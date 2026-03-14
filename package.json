@@ -1,0 +1,22 @@
+{
+  "name": "chatter-blocks",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Foundry-based on-chain direct messaging with a Node CLI and end-to-end encryption.",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "chat": "node cli/cli.js",
+    "test:node": "node --test cli/test/*.test.js",
+    "test:sol": "forge test",
+    "test": "pnpm test:sol && pnpm test:node"
+  },
+  "dependencies": {
+    "commander": "^14.0.1",
+    "tweetnacl": "^1.0.3",
+    "viem": "^2.38.6"
+  }
+}
