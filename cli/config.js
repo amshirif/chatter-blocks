@@ -57,7 +57,7 @@ export function resolveCursor(rawValue) {
 
     return cursor;
   } catch {
-    throw new Error("Cursor must be a non-negative integer message ID.");
+    throw new Error("Cursor must be a non-negative integer.");
   }
 }
 
@@ -80,6 +80,20 @@ export async function createConnections(options) {
     account,
     publicClient,
     walletClient,
+    chainId
+  };
+}
+
+export async function createPublicConnection(options) {
+  const rpcUrl = resolveRpcUrl(options);
+  const contractAddress = resolveContractAddress(options);
+  const publicClient = createPublicClient({ transport: http(rpcUrl) });
+  const chainId = await publicClient.getChainId();
+
+  return {
+    rpcUrl,
+    contractAddress,
+    publicClient,
     chainId
   };
 }
