@@ -17,8 +17,12 @@ function decodeBase64(value) {
   return Uint8Array.from(Buffer.from(value, "base64"));
 }
 
+export function getWalletStateDir({ chainId, walletAddress, baseDir = defaultBaseDir() }) {
+  return path.join(baseDir, String(chainId), getAddress(walletAddress).toLowerCase());
+}
+
 export function getKeyringPath({ chainId, walletAddress, baseDir = defaultBaseDir() }) {
-  return path.join(baseDir, String(chainId), getAddress(walletAddress).toLowerCase(), "keyring.json");
+  return path.join(getWalletStateDir({ chainId, walletAddress, baseDir }), "keyring.json");
 }
 
 export async function readKeyring({ chainId, walletAddress, baseDir = defaultBaseDir() }) {
