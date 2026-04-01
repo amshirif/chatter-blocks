@@ -9,6 +9,11 @@ interface Vm {
     /// @param name The environment variable name.
     /// @return value The parsed unsigned integer value.
     function envUint(string calldata name) external returns (uint256 value);
+    /// @notice Reads an unsigned integer environment variable or returns a default.
+    /// @param name The environment variable name.
+    /// @param defaultValue The fallback value when the variable is absent.
+    /// @return value The parsed unsigned integer value or `defaultValue`.
+    function envOr(string calldata name, uint256 defaultValue) external returns (uint256 value);
     /// @notice Starts broadcasting subsequent transactions with the provided private key.
     /// @param privateKey The deployer private key.
     function startBroadcast(uint256 privateKey) external;
@@ -25,10 +30,14 @@ contract DeployChatterBlocksScript {
     Vm private constant vm = Vm(VM_ADDRESS);
 
     /// @notice Deploys a new `ChatterBlocks` instance.
-    /// @dev Expects `PRIVATE_KEY` to be present in the environment.
+    /// @dev Expects `PRIVATE_KEY` or `CHATTER_PRIVATE_KEY` to be present in the environment.
     /// @return deployedAt The address of the deployed contract.
     function run() external returns (address deployedAt) {
-        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        uint256 deployerKey = vm.envOr("PRIVATE_KEY", uint256(0));
+        if (deployerKey == 0) {
+            deployerKey = vm.envOr("CHATTER_PRIVATE_KEY", uint256(0));
+        }
+        require(deployerKey != 0, "Set PRIVATE_KEY or CHATTER_PRIVATE_KEY before deploying.");
 
         vm.startBroadcast(deployerKey);
         deployedAt = address(new ChatterBlocks());

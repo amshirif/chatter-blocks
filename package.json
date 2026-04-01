@@ -10,6 +10,7 @@
   },
   "scripts": {
     "chat": "node cli/cli.js",
+    "walkthrough:fallback": "bash scripts/walkthrough-fallback.sh",
     "test:node": "node --test cli/test/*.test.js",
     "test:sol": "forge test",
     "test": "pnpm test:sol && pnpm test:node"

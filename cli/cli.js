@@ -99,8 +99,9 @@ addSharedOptions(
   program
     .command("start")
     .description("Run the setup wizard and open the terminal chat app.")
+    .option("--rotate", "rotate the chat key during the setup wizard")
 ).action(async (options) => {
-  await launchChatApp(options, { runWizard: true });
+  await launchChatApp(options, { runWizard: true, rotate: Boolean(options.rotate) });
 });
 
 addSharedOptions(

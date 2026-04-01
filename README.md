@@ -92,6 +92,8 @@ export CHATTER_CONTRACT_ADDRESS=0xYOUR_DEPLOYED_CONTRACT
 
 `CHATTER_CONTRACT_ADDRESS` is the only contract discovery mechanism in v1. The hub is just this contract at a known address on the selected chain.
 
+The deploy script accepts either `PRIVATE_KEY` or `CHATTER_PRIVATE_KEY` for the deployer wallet.
+
 ## Quick demo
 
 This is the fastest way to see the product working from a fresh clone with two local users.
@@ -150,6 +152,27 @@ Once both apps are open:
 5. The other side opens the same thread and sees the decrypted message.
 
 If you want a pure command-line demo instead of the app, the low-level flow later in this README does the same thing with raw commands.
+
+## Walkthrough assets
+
+If you want to give a live demo, the repo now includes two dedicated assets:
+
+- [docs/walkthrough-runbook.md](/Users/amirshirif/Documents/personal/chatter-blocks/docs/walkthrough-runbook.md): a short presenter script for a 10-15 minute technical walkthrough
+- [scripts/walkthrough-fallback.sh](/Users/amirshirif/Documents/personal/chatter-blocks/scripts/walkthrough-fallback.sh): a raw CLI fallback helper if the terminal app flow becomes awkward live
+
+Example fallback usage from an already-configured Alice or Bob shell:
+
+```bash
+bash scripts/walkthrough-fallback.sh setup
+bash scripts/walkthrough-fallback.sh post "paper boat" "silver tide"
+bash scripts/walkthrough-fallback.sh respond YOUR_SHARE_CODE
+bash scripts/walkthrough-fallback.sh responses 1
+bash scripts/walkthrough-fallback.sh accept 1 1
+bash scripts/walkthrough-fallback.sh send 0xPEER_OR_ALIAS "rendezvous worked"
+bash scripts/walkthrough-fallback.sh inbox 0xPEER_OR_ALIAS
+```
+
+If you prefer a package-script entrypoint, use `pnpm run walkthrough:fallback help`.
 
 ## Fastest onboarding
 
@@ -383,7 +406,9 @@ All of these files are local only. None of them are uploaded by the app. In v1 t
 - `Missing private key`:
   set `CHATTER_PRIVATE_KEY` or pass `--private-key`.
 - `No active chat key` or you cannot decrypt expected messages:
-  run `pnpm chat setup`; if you intentionally want a new chat key, run `pnpm chat setup --rotate`.
+  run `pnpm chat setup`; if you intentionally want a new chat key, run `pnpm chat setup --rotate` or `pnpm chat start --rotate`.
+- you reused an old `CHATTER_HOME` against a fresh local chain:
+  `pnpm chat start` will now offer to register the existing local key on the new chain; if the local key and on-chain key truly diverge, use `pnpm chat start --rotate`.
 - `Unknown contact address or alias`:
   check `pnpm chat contacts list` or save the contact first.
 - invite response is invalid or an invite has expired:

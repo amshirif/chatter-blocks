@@ -41,7 +41,11 @@ import {
   upsertKeyMaterial,
   writeKeyring
 } from "../keyring.js";
-import { decodeInviteShareCode, encodeInviteShareCode } from "../workflows.js";
+import {
+  decodeInviteShareCode,
+  encodeInviteShareCode,
+  resolveSetupStrategy
+} from "../workflows.js";
 
 const ALICE = "0x1000000000000000000000000000000000000001";
 const BOB = "0x2000000000000000000000000000000000000002";
@@ -529,4 +533,52 @@ test("share bundle codes roundtrip without losing invite details", () => {
     phraseA: "paper boat",
     phraseB: "silver tide"
   });
+});
+
+test("setup strategy reuses a local key when the chain has no registered key", () => {
+  const pair = createChatKeypair();
+  const keyring = upsertKeyMaterial({
+    keyring: null,
+    chainId: 31337,
+    walletAddress: ALICE,
+    version: 4,
+    publicKey: pair.publicKey,
+    secretKey: pair.secretKey
+  });
+
+  const strategy = resolveSetupStrategy({
+    rotate: false,
+    keyring,
+    onChainKey: {
+      version: 0n,
+      pubKey: `0x${"00".repeat(32)}`
+    }
+  });
+
+  assert.equal(strategy.action, "reuse-local-key");
+  assert.equal(bytesToHex(strategy.localKey.publicKey), bytesToHex(pair.publicKey));
+});
+
+test("setup strategy requires rotation when the on-chain key and local key diverge", () => {
+  const pair = createChatKeypair();
+  const keyring = upsertKeyMaterial({
+    keyring: null,
+    chainId: 31337,
+    walletAddress: ALICE,
+    version: 1,
+    publicKey: pair.publicKey,
+    secretKey: pair.secretKey
+  });
+
+  const strategy = resolveSetupStrategy({
+    rotate: false,
+    keyring,
+    onChainKey: {
+      version: 2n,
+      pubKey: `0x${"ff".repeat(32)}`
+    }
+  });
+
+  assert.equal(strategy.action, "rotation-required");
+  assert.match(strategy.message, /chat start --rotate/);
 });

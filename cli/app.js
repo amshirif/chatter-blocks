@@ -216,7 +216,15 @@ async function inspectHealth(options) {
   };
 }
 
-async function runSetupWizard(options, rl) {
+async function runSetupWizard(options, rl, { rotate = false } = {}) {
+  if (rotate) {
+    const result = await setupChatWorkflow(options, { rotate: true });
+    return {
+      health: await inspectHealth(options),
+      message: `Rotated chat key to version ${result.registration.version.toString()}.`
+    };
+  }
+
   const health = await inspectHealth(options);
 
   if (health.status === "ready") {
@@ -226,20 +234,35 @@ async function runSetupWizard(options, rl) {
     };
   }
 
-  let message = "";
-  if (health.status === "key-mismatch") {
-    const rotate = await confirm(rl, "Local key is out of sync. Rotate the chat key now?");
-    if (rotate) {
+  let message = "Skipped chat-key setup.";
+  if (health.status === "missing-onchain-key") {
+    const register = await confirm(
+      rl,
+      health.localKey
+        ? "Local chat key exists but is not registered on this chain. Register it now?"
+        : "No chat key is registered on this chain. Create and register one now?"
+    );
+    if (register) {
+      const result = await setupChatWorkflow(options);
+      message = result.reusedLocalKey
+        ? `Registered existing local chat key as version ${result.registration.version.toString()}.`
+        : `Registered chat key version ${result.registration.version.toString()}.`;
+    }
+  } else if (health.status === "missing-local-keyring" || health.status === "missing-local-key") {
+    const rotateLocal = await confirm(
+      rl,
+      "An on-chain chat key exists, but the local private key is missing. Rotate the chat key now?",
+      true
+    );
+    if (rotateLocal) {
       const result = await setupChatWorkflow(options, { rotate: true });
       message = `Rotated chat key to version ${result.registration.version.toString()}.`;
     }
-  } else {
-    const register = await confirm(rl, "No usable chat key found. Register one now?");
-    if (register) {
-      const result = await setupChatWorkflow(options);
-      message = result.alreadyConfigured
-        ? `Chat key already configured for ${result.walletAddress}.`
-        : `Registered chat key version ${result.registration.version.toString()}.`;
+  } else if (health.status === "key-mismatch") {
+    const rotateMismatch = await confirm(rl, "Local key is out of sync. Rotate the chat key now?");
+    if (rotateMismatch) {
+      const result = await setupChatWorkflow(options, { rotate: true });
+      message = `Rotated chat key to version ${result.registration.version.toString()}.`;
     }
   }
 
@@ -797,7 +820,7 @@ async function openSettingsScreen(rl, options) {
   }
 }
 
-export async function launchChatApp(baseOptions, { runWizard = false } = {}) {
+export async function launchChatApp(baseOptions, { runWizard = false, rotate = false } = {}) {
   const rl = createInterface({ input, output });
   let options;
   let filter = "";
@@ -810,7 +833,7 @@ export async function launchChatApp(baseOptions, { runWizard = false } = {}) {
       clearScreen();
       console.log(divider("Welcome To ChatterBlocks"));
       console.log("This client keeps message contents encrypted, but wallet activity stays public on-chain.");
-      const wizardResult = await runSetupWizard(options, rl);
+      const wizardResult = await runSetupWizard(options, rl, { rotate });
       wizardMessage = wizardResult.message;
     }
 
