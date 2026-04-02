@@ -56,6 +56,8 @@ By default:
 
 - `keyring.json` and `hub.json` are plaintext unless a passphrase is configured
 - `contacts.json` and `app-state.json` remain plaintext convenience metadata
+- losing `keyring.json` can strand older messages or invite responses that depend on historical local key versions
+- losing `hub.json` can prevent local invite-response validation and private invite recovery
 
 ## Requirements
 
@@ -437,6 +439,48 @@ All of these files are local only. None of them are uploaded by the app.
 - `contacts.json` and `app-state.json` remain plaintext convenience metadata
 - without a passphrase, all files remain part of the local trust boundary
 
+## Backup and Recovery
+
+If you care about older message history or posted invite recovery, back up local secret state before rotating keys or moving machines:
+
+```bash
+pnpm chat secrets export --file ./chatter-secrets.json
+```
+
+The secret backup contains:
+
+- `keyring.json`
+- `hub.json`
+- the current wallet address
+- the current chain id
+- an export timestamp
+
+It does not contain:
+
+- `contacts.json`
+- `app-state.json`
+- public on-chain data
+
+Restore the backup later with:
+
+```bash
+pnpm chat secrets import --file ./chatter-secrets.json
+```
+
+Inspect local secret state with:
+
+```bash
+pnpm chat secrets show
+```
+
+Notes:
+
+- imports are wallet-scoped and chain-scoped; the backup must match the current wallet and RPC chain
+- secret imports replace the current `keyring.json` and `hub.json`; they do not merge
+- encrypted secret files stay encrypted in the backup; plaintext files stay plaintext
+- passphrase protection only protects local-at-rest secret files, not public chain metadata
+- restoring a backup does not recover anything that was never stored locally
+
 ## Troubleshooting
 
 `pnpm chat start` is the easiest recovery path because it checks the most common misconfigurations. If you prefer raw commands, these are the usual fixes:
@@ -449,6 +493,8 @@ All of these files are local only. None of them are uploaded by the app.
   set `CHATTER_PRIVATE_KEY` or pass `--private-key`.
 - `Keyring is encrypted` or `Hub state is encrypted`:
   set `CHATTER_PASSPHRASE`, pass `--passphrase`, or rerun `pnpm chat start` and enter the passphrase.
+- `missing local key version ...` appears in previews, threads, or invite validation:
+  restore a prior `pnpm chat secrets export` backup that still contains that historical key version before rotating again.
 - `No active chat key` or you cannot decrypt expected messages:
   run `pnpm chat setup`; if you intentionally want a new chat key, run `pnpm chat setup --rotate`.
 - `Unknown contact address or alias`:
@@ -479,6 +525,9 @@ Commands:
 - `pnpm chat app`
 - `pnpm chat setup [--rotate]`
 - `pnpm chat send --to <addressOrAlias> --message <text>`
+- `pnpm chat secrets export --file <path>`
+- `pnpm chat secrets import --file <path>`
+- `pnpm chat secrets show`
 - `pnpm chat contacts list`
 - `pnpm chat contacts save --address <address> [--alias <alias>] [--notes <text>]`
 - `pnpm chat contacts show --with <addressOrAlias>`

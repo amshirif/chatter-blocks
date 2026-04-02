@@ -29,6 +29,7 @@ import {
   encryptInviteResponseEnvelope,
   extractMatchPeer,
   formatInviteSummary,
+  getHubPath,
   readHubState,
   upsertHubInviteRecord,
   upsertHubResponseRecord,
@@ -39,10 +40,16 @@ import {
   createChatKeypair,
   getActiveLocalKey,
   getLocalKey,
+  getKeyringPath,
   readKeyring,
   upsertKeyMaterial,
   writeKeyring
 } from "../keyring.js";
+import {
+  exportSecretState,
+  importSecretState,
+  inspectSecretState
+} from "../secrets.js";
 import { decodeInviteShareCode, encodeInviteShareCode } from "../workflows.js";
 import { loadDotEnv } from "../env.js";
 import {
@@ -187,6 +194,186 @@ test("encrypted keyring and hub state require a passphrase and avoid plaintext s
       passphrase
     });
     assert.equal(storedHubState.invites["1"].phraseA, "paper boat");
+  } finally {
+    await rm(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("secret export and import roundtrip preserves plaintext local keyring and hub state", async () => {
+  const baseDir = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-secret-export-"));
+  const exportPath = path.join(baseDir, "backup.json");
+  const pair = createChatKeypair();
+  const keyring = upsertKeyMaterial({
+    keyring: null,
+    chainId: 31337,
+    walletAddress: ALICE,
+    version: 1,
+    publicKey: pair.publicKey,
+    secretKey: pair.secretKey
+  });
+  const hubState = upsertHubInviteRecord({
+    hubState: null,
+    chainId: 31337,
+    walletAddress: ALICE,
+    inviteId: 1n,
+    role: "poster",
+    inviteSecret: `0x${"11".repeat(32)}`,
+    phraseA: "paper boat",
+    phraseB: "silver tide",
+    inviteCommitment: `0x${"22".repeat(32)}`,
+    posterWalletAddress: ALICE,
+    posterKeyVersion: 1,
+    expiresAt: 1000,
+    status: "ACTIVE"
+  });
+
+  try {
+    await writeKeyring({ chainId: 31337, walletAddress: ALICE, keyring, baseDir });
+    await writeHubState({ chainId: 31337, walletAddress: ALICE, hubState, baseDir });
+
+    const exported = await exportSecretState({
+      chainId: 31337,
+      walletAddress: ALICE
+    }, {
+      filePath: exportPath,
+      baseDir
+    });
+
+    assert.equal(exported.walletAddress, ALICE.toLowerCase());
+    const backup = JSON.parse(await readFile(exportPath, "utf8"));
+    assert.equal(backup.keyring.activeVersion, 1);
+    assert.equal(backup.hubState.invites["1"].phraseA, "paper boat");
+
+    await rm(getKeyringPath({ chainId: 31337, walletAddress: ALICE, baseDir }), { force: true });
+    await rm(getHubPath({ chainId: 31337, walletAddress: ALICE, baseDir }), { force: true });
+
+    const imported = await importSecretState({
+      chainId: 31337,
+      walletAddress: ALICE
+    }, {
+      filePath: exportPath,
+      baseDir
+    });
+
+    assert.equal(imported.walletAddress, ALICE.toLowerCase());
+    const restoredKeyring = await readKeyring({ chainId: 31337, walletAddress: ALICE, baseDir });
+    const restoredHubState = await readHubState({ chainId: 31337, walletAddress: ALICE, baseDir });
+    assert.equal(restoredKeyring.activeVersion, 1);
+    assert.equal(restoredHubState.invites["1"].phraseB, "silver tide");
+  } finally {
+    await rm(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("secret export preserves encrypted envelopes and secret-state inspection reports readability", async () => {
+  const baseDir = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-secret-export-enc-"));
+  const exportPath = path.join(baseDir, "backup.json");
+  const passphrase = "correct horse battery staple";
+  const pair = createChatKeypair();
+  const keyring = upsertKeyMaterial({
+    keyring: null,
+    chainId: 31337,
+    walletAddress: ALICE,
+    version: 1,
+    publicKey: pair.publicKey,
+    secretKey: pair.secretKey
+  });
+  const hubState = upsertHubInviteRecord({
+    hubState: null,
+    chainId: 31337,
+    walletAddress: ALICE,
+    inviteId: 1n,
+    role: "poster",
+    inviteSecret: `0x${"11".repeat(32)}`,
+    phraseA: "paper boat",
+    phraseB: "silver tide",
+    inviteCommitment: `0x${"22".repeat(32)}`,
+    posterWalletAddress: ALICE,
+    posterKeyVersion: 1,
+    expiresAt: 1000,
+    status: "ACTIVE"
+  });
+
+  try {
+    await writeKeyring({ chainId: 31337, walletAddress: ALICE, keyring, baseDir, passphrase });
+    await writeHubState({ chainId: 31337, walletAddress: ALICE, hubState, baseDir, passphrase });
+
+    const locked = await inspectSecretState({ chainId: 31337, walletAddress: ALICE, baseDir });
+    assert.equal(locked.keyring.storage, "encrypted");
+    assert.equal(locked.keyring.readable, false);
+    assert.match(locked.keyring.error, /Keyring is encrypted/);
+    assert.equal(locked.hubState.storage, "encrypted");
+    assert.equal(locked.hubState.readable, false);
+
+    const unlocked = await inspectSecretState({ chainId: 31337, walletAddress: ALICE, baseDir, passphrase });
+    assert.equal(unlocked.keyring.readable, true);
+    assert.equal(unlocked.keyring.activeKeyVersion, 1);
+    assert.equal(unlocked.keyring.historicalKeyCount, 1);
+    assert.equal(unlocked.hubState.readable, true);
+    assert.equal(unlocked.hubState.inviteCount, 1);
+
+    await exportSecretState({
+      chainId: 31337,
+      walletAddress: ALICE
+    }, {
+      filePath: exportPath,
+      baseDir,
+      passphrase
+    });
+
+    const backup = JSON.parse(await readFile(exportPath, "utf8"));
+    assert.equal(backup.keyring.encrypted, true);
+    assert.equal(backup.hubState.encrypted, true);
+  } finally {
+    await rm(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("secret import rejects malformed, wrong-chain, and wrong-wallet backups", async () => {
+  const baseDir = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-secret-import-"));
+  const exportPath = path.join(baseDir, "backup.json");
+
+  try {
+    await writeFile(exportPath, JSON.stringify({ nope: true }));
+    await assert.rejects(
+      () => importSecretState({ chainId: 31337, walletAddress: ALICE }, {
+        filePath: exportPath,
+        baseDir
+      }),
+      /malformed/
+    );
+
+    await writeFile(exportPath, JSON.stringify({
+      schemaVersion: 1,
+      chainId: "1",
+      walletAddress: ALICE.toLowerCase(),
+      exportedAt: new Date().toISOString(),
+      keyring: null,
+      hubState: null
+    }));
+    await assert.rejects(
+      () => importSecretState({ chainId: 31337, walletAddress: ALICE }, {
+        filePath: exportPath,
+        baseDir
+      }),
+      /targets chain 1/
+    );
+
+    await writeFile(exportPath, JSON.stringify({
+      schemaVersion: 1,
+      chainId: "31337",
+      walletAddress: BOB.toLowerCase(),
+      exportedAt: new Date().toISOString(),
+      keyring: null,
+      hubState: null
+    }));
+    await assert.rejects(
+      () => importSecretState({ chainId: 31337, walletAddress: ALICE }, {
+        filePath: exportPath,
+        baseDir
+      }),
+      /targets wallet/
+    );
   } finally {
     await rm(baseDir, { recursive: true, force: true });
   }

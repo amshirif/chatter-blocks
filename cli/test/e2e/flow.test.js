@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -871,6 +871,137 @@ test("contacts screen keeps fixed primary actions and validates add-contact in p
       assert.match(savedContactsSlice, /3\. Import contacts/);
       assert.match(savedContactsSlice, /4\. Refresh/);
       assert.match(savedContactsSlice, /5\. Open bob/);
+      assert.doesNotMatch(app.stderr, /readline was closed/);
+    } finally {
+      await app.quit();
+    }
+  });
+});
+
+test("secret backup export and import restore older message decryptability after historical key loss", E2E_TEST_OPTIONS, async () => {
+  await withLocalChain(async ({ aliceEnv, bobEnv }) => {
+    await runCommand(commandName("pnpm"), ["chat", "setup"], { env: aliceEnv });
+    await runCommand(commandName("pnpm"), ["chat", "setup"], { env: bobEnv });
+
+    await runCommand(commandName("pnpm"), [
+      "chat", "send",
+      "--to", ALICE_ADDRESS,
+      "--message", "before rotate"
+    ], { env: bobEnv, timeoutMs: 120_000 });
+
+    await runCommand(commandName("pnpm"), ["chat", "setup", "--rotate"], { env: aliceEnv, timeoutMs: 120_000 });
+
+    await runCommand(commandName("pnpm"), [
+      "chat", "send",
+      "--to", ALICE_ADDRESS,
+      "--message", "after rotate"
+    ], { env: bobEnv, timeoutMs: 120_000 });
+
+    const backupPath = path.join(aliceEnv.CHATTER_HOME, "secret-backup.json");
+    await runCommand(commandName("pnpm"), [
+      "chat", "secrets", "export",
+      "--file", backupPath
+    ], { env: aliceEnv, timeoutMs: 120_000 });
+
+    const keyringPath = path.join(
+      aliceEnv.CHATTER_HOME,
+      "31337",
+      ALICE_ADDRESS.toLowerCase(),
+      "keyring.json"
+    );
+    const tamperedKeyring = JSON.parse(await readFile(keyringPath, "utf8"));
+    delete tamperedKeyring.keys["1"];
+    tamperedKeyring.activeVersion = 2;
+    await writeFile(keyringPath, `${JSON.stringify(tamperedKeyring, null, 2)}\n`);
+
+    const degradedInbox = await runCommand(commandName("pnpm"), [
+      "chat", "inbox",
+      "--with", BOB_ADDRESS
+    ], { env: aliceEnv });
+    assert.match(degradedInbox.stdout, /missing local key version 1/);
+    assert.match(degradedInbox.stdout, /after rotate/);
+
+    await runCommand(commandName("pnpm"), [
+      "chat", "secrets", "import",
+      "--file", backupPath
+    ], { env: aliceEnv, timeoutMs: 120_000 });
+
+    const restoredInbox = await runCommand(commandName("pnpm"), [
+      "chat", "inbox",
+      "--with", BOB_ADDRESS
+    ], { env: aliceEnv });
+    assert.match(restoredInbox.stdout, /before rotate/);
+    assert.match(restoredInbox.stdout, /after rotate/);
+    assert.doesNotMatch(restoredInbox.stdout, /missing local key version/);
+  });
+});
+
+test("encrypted secret backups import cleanly and settings show actual local secret state", E2E_TEST_OPTIONS, async () => {
+  await withLocalChain(async ({ aliceEnv }) => {
+    const passphrase = "correct horse battery staple";
+    const encryptedEnv = {
+      ...aliceEnv,
+      CHATTER_PASSPHRASE: passphrase
+    };
+    const backupPath = path.join(aliceEnv.CHATTER_HOME, "encrypted-secret-backup.json");
+    const walletStateDir = path.join(
+      aliceEnv.CHATTER_HOME,
+      "31337",
+      ALICE_ADDRESS.toLowerCase()
+    );
+
+    await runCommand(commandName("pnpm"), ["chat", "setup"], { env: encryptedEnv });
+    await runCommand(commandName("pnpm"), [
+      "chat", "hub", "post",
+      "--phrase", "paper boat",
+      "--expect", "silver tide"
+    ], { env: encryptedEnv, timeoutMs: 120_000 });
+    await runCommand(commandName("pnpm"), [
+      "chat", "secrets", "export",
+      "--file", backupPath
+    ], { env: encryptedEnv, timeoutMs: 120_000 });
+
+    await rm(path.join(walletStateDir, "keyring.json"), { force: true });
+    await rm(path.join(walletStateDir, "hub.json"), { force: true });
+
+    await runCommand(commandName("pnpm"), [
+      "chat", "secrets", "import",
+      "--file", backupPath
+    ], { env: aliceEnv, timeoutMs: 120_000 });
+
+    const showOutput = await runCommand(commandName("pnpm"), ["chat", "secrets", "show"], {
+      env: aliceEnv
+    });
+    assert.match(showOutput.stdout, /keyring\.json: encrypted/);
+    assert.match(showOutput.stdout, /keyring readable: no/);
+    assert.match(showOutput.stdout, /hub\.json: encrypted/);
+    assert.match(showOutput.stdout, /hub readable: no/);
+
+    const app = createInteractiveSession(commandName("pnpm"), ["chat", "start"], {
+      env: aliceEnv,
+      timeoutMs: 120_000
+    });
+
+    try {
+      let checkpoint = 0;
+      await app.waitFor("Passphrase:", { fromIndex: checkpoint });
+      checkpoint = app.stdout.length;
+      app.send(`${passphrase}\n`);
+      await app.waitFor("Select action:", { fromIndex: checkpoint });
+
+      checkpoint = app.stdout.length;
+      app.send("3\n");
+      await app.waitFor("Select action:", { fromIndex: checkpoint });
+
+      checkpoint = app.stdout.length;
+      app.send("2\n");
+      const localSecretStateSlice = await app.waitFor("Select action:", { fromIndex: checkpoint });
+      assert.match(localSecretStateSlice, /Local Secret State/);
+      assert.match(localSecretStateSlice, /Passphrase active: yes/);
+      assert.match(localSecretStateSlice, /keyring\.json: encrypted/);
+      assert.match(localSecretStateSlice, /readable now: yes/);
+      assert.match(localSecretStateSlice, /hub\.json: encrypted/);
+      assert.match(localSecretStateSlice, /stored invites: 1/);
       assert.doesNotMatch(app.stderr, /readline was closed/);
     } finally {
       await app.quit();
