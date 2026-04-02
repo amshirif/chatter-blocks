@@ -149,36 +149,47 @@ For a repeatable local demo, the repo now includes helper scripts:
 ```bash
 pnpm demo:chain
 pnpm demo:deploy
+pnpm demo:fresh
 pnpm demo:alice
 pnpm demo:bob
 pnpm demo:env
+pnpm demo:status
 pnpm demo:clean
 ```
 
-`pnpm demo:deploy` creates a fresh demo session, deploys the contract, and prints the exact export blocks for Alice and Bob after deployment, including the deployed contract address. `pnpm demo:env` reprints the current session, and `pnpm demo:clean` clears it.
+Use them like this:
+
+- `pnpm demo:fresh`: preferred path; starts a clean managed Anvil, deploys the contract, and prints Alice/Bob env blocks
+- `pnpm demo:deploy`: deploys onto the current RPC and warns if that chain already has activity
+- `pnpm demo:env`: reprints the current session env blocks
+- `pnpm demo:status`: shows the current demo session plus managed-chain status
+- `pnpm demo:clean`: clears the current demo session and stops any managed Anvil started by `pnpm demo:fresh`
+
+Important: the smoothest first-run demo path requires a fresh local chain, not just fresh local homes. Reusing an older chain can legitimately trigger rotate/recovery prompts because the app sees existing on-chain chat-key history.
 
 ## Quick demo
 
 This is the fastest way to see the product working from a fresh clone with two local users.
 
-Use four terminals if you want to keep deploy output visible, or three if you reuse Alice's shell.
+Use three terminals. This path intentionally starts a fresh managed local chain so Alice and Bob get the simplest first-run app flow.
 
-Terminal 1 starts Anvil:
+Terminal 1 creates a clean local demo environment:
 
 ```bash
-pnpm demo:chain
+pnpm demo:fresh
 ```
+
+This command:
+
+- starts a clean managed Anvil instance
+- deploys a fresh `ChatterBlocks` contract
+- creates fresh Alice/Bob local homes
+- prints the exact env blocks and session info
 
 Terminal 2 is Alice. This example uses the first default Anvil account:
 
 - wallet: `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`
 - private key: `0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80`
-
-Deploy first:
-
-```bash
-pnpm demo:deploy
-```
 
 Terminal 3 is Bob. This example uses the second default Anvil account:
 
@@ -189,7 +200,7 @@ Terminal 3 is Bob. This example uses the second default Anvil account:
 pnpm demo:alice
 ```
 
-Terminal 4 is Bob:
+Terminal 3 is Bob:
 
 ```bash
 pnpm demo:bob
@@ -205,6 +216,14 @@ Once both apps are open:
 6. The other side opens the same thread and sees the decrypted message.
 
 If you want a pure command-line demo instead of the app, the low-level flow later in this README does the same thing with raw commands.
+
+If you intentionally want to reuse an already-running chain instead of starting fresh, use:
+
+```bash
+pnpm demo:deploy
+```
+
+That path is valid, but it may lead the app into correct recovery/rotation prompts if the chain already has prior chat-key history.
 
 ## Fastest onboarding
 
