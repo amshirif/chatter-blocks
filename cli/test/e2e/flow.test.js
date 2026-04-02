@@ -7,8 +7,9 @@ import test from "node:test";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = "/Users/amirshirif/Documents/personal/chatter-blocks";
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const DEPLOYER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const ALICE_KEY = DEPLOYER_KEY;
 const BOB_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
