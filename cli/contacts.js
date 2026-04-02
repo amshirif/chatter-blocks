@@ -24,6 +24,27 @@ function normalizeAlias(alias) {
   return trimmed;
 }
 
+export function validateContactAlias(alias, { allowEmpty = true } = {}) {
+  if (alias === undefined || alias === null) {
+    return allowEmpty ? null : "Alias is required.";
+  }
+
+  const trimmed = String(alias).trim();
+  if (!trimmed) {
+    return allowEmpty ? null : "Alias is required.";
+  }
+
+  if (trimmed.length > 40) {
+    return "Alias must be 40 characters or fewer.";
+  }
+
+  if (!/^[A-Za-z0-9._ -]+$/u.test(trimmed)) {
+    return "Alias may only include letters, numbers, spaces, ., _, and -.";
+  }
+
+  return null;
+}
+
 function normalizeNotes(notes) {
   if (notes === undefined || notes === null) {
     return null;

@@ -10,9 +10,16 @@
   },
   "scripts": {
     "chat": "node cli/cli.js",
+    "demo:chain": "anvil",
+    "demo:deploy": "bash scripts/demo-local.sh deploy",
+    "demo:alice": "bash scripts/demo-local.sh alice",
+    "demo:bob": "bash scripts/demo-local.sh bob",
+    "demo:clean": "bash scripts/demo-local.sh clean",
+    "demo:env": "bash scripts/demo-local.sh env",
     "test:node": "node --test cli/test/*.test.js",
+    "test:e2e": "node --test cli/test/e2e/*.test.js",
     "test:sol": "forge test",
-    "test": "pnpm test:sol && pnpm test:node"
+    "test": "pnpm test:sol && pnpm test:node && pnpm test:e2e"
   },
   "dependencies": {
     "commander": "^14.0.1",
