@@ -16,6 +16,29 @@ BOB_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 SESSION_ROOT="${CHATTER_DEMO_ROOT:-/tmp/chatter-blocks-demo}"
 SESSION_FILE="${SESSION_ROOT}/current-session.env"
 
+resolve_anvil_bin() {
+  if [[ -n "${ANVIL_BIN:-}" ]]; then
+    printf '%s\n' "${ANVIL_BIN}"
+    return
+  fi
+
+  if [[ -x "${HOME}/.foundry/bin/anvil" ]]; then
+    printf '%s\n' "${HOME}/.foundry/bin/anvil"
+    return
+  fi
+
+  if [[ -n "${FORGE_BIN:-}" ]]; then
+    local forge_dir
+    forge_dir="$(dirname -- "${FORGE_BIN}")"
+    if [[ -x "${forge_dir}/anvil" ]]; then
+      printf '%s\n' "${forge_dir}/anvil"
+      return
+    fi
+  fi
+
+  printf '%s\n' "anvil"
+}
+
 load_local_env() {
   if [[ -f "${REPO_ROOT}/.env" ]]; then
     set -a
@@ -152,6 +175,7 @@ run_chat_start() {
 usage() {
   cat <<'EOF'
 Usage:
+  bash scripts/demo-local.sh chain
   bash scripts/demo-local.sh deploy
   bash scripts/demo-local.sh alice
   bash scripts/demo-local.sh bob
@@ -159,6 +183,7 @@ Usage:
   bash scripts/demo-local.sh clean
 
 Notes:
+  - 'chain' starts Anvil using ANVIL_BIN, ~/.foundry/bin/anvil, or PATH lookup.
   - 'deploy' creates a fresh demo session and uses local Anvil defaults unless overridden by .env or shell env.
   - 'alice' and 'bob' use the current demo session created by 'deploy'.
   - 'env' prints the exact export blocks for the current demo session.
@@ -175,6 +200,9 @@ main() {
   local session_home
 
   case "${cmd}" in
+    chain)
+      exec "$(resolve_anvil_bin)" --port "$(printf '%s' "$(resolve_rpc_url)" | awk -F: '{print $NF}')"
+      ;;
     deploy)
       create_fresh_session
       rpc_url="$(resolve_rpc_url)"

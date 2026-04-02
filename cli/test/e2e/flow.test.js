@@ -4,6 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
@@ -17,6 +18,41 @@ const E2E_TEST_OPTIONS = { timeout: 300_000, concurrency: false };
 
 function commandName(name) {
   return process.platform === "win32" ? `${name}.cmd` : name;
+}
+
+function resolveFoundryBinary(name) {
+  const envName = `${name.toUpperCase()}_BIN`;
+  if (process.env[envName]) {
+    return process.env[envName];
+  }
+
+  const preferred = commandName(name);
+  const home = process.env.HOME || os.homedir();
+  const candidates = [
+    path.join(home, ".foundry", "bin", preferred)
+  ];
+
+  const forgeBin = process.env.FORGE_BIN;
+  if (forgeBin) {
+    candidates.push(path.join(path.dirname(forgeBin), preferred));
+  }
+
+  for (const segment of (process.env.PATH || "").split(path.delimiter)) {
+    if (!segment) {
+      continue;
+    }
+
+    const candidate = path.join(segment, preferred);
+    candidates.push(candidate);
+  }
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return preferred;
 }
 
 function delay(ms) {
@@ -322,7 +358,7 @@ async function withLocalChain(callback) {
   const port = await getFreePort();
   const rpcUrl = `http://127.0.0.1:${port}`;
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-e2e-"));
-  const anvil = spawn(commandName("anvil"), ["--port", String(port)], {
+  const anvil = spawn(resolveFoundryBinary("anvil"), ["--port", String(port)], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
@@ -721,7 +757,7 @@ test("demo-local helper enforces sessions and prints isolated env blocks", E2E_T
   const port = await getFreePort();
   const rpcUrl = `http://127.0.0.1:${port}`;
   const demoRoot = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-demo-"));
-  const anvil = spawn(commandName("anvil"), ["--port", String(port)], {
+  const anvil = spawn(resolveFoundryBinary("anvil"), ["--port", String(port)], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,

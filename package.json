@@ -10,7 +10,7 @@
   },
   "scripts": {
     "chat": "node cli/cli.js",
-    "demo:chain": "anvil",
+    "demo:chain": "bash scripts/demo-local.sh chain",
     "demo:deploy": "bash scripts/demo-local.sh deploy",
     "demo:alice": "bash scripts/demo-local.sh alice",
     "demo:bob": "bash scripts/demo-local.sh bob",
