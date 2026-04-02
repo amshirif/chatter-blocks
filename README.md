@@ -171,6 +171,12 @@ Important: the smoothest first-run demo path requires a fresh local chain, not j
 
 This is the fastest way to see the product working from a fresh clone with two local users.
 
+For the first technical-friend trial round, use the shorter field-test kit instead of improvising from the full README:
+
+- [Tester runbook](/Users/amirshirif/Documents/personal/chatter-blocks/docs/field-test/runbook.md)
+- [Feedback template](/Users/amirshirif/Documents/personal/chatter-blocks/docs/field-test/feedback-template.md)
+- [Maintainer checklist](/Users/amirshirif/Documents/personal/chatter-blocks/docs/field-test/maintainer-checklist.md)
+
 Use three terminals. This path intentionally starts a fresh managed local chain so Alice and Bob get the simplest first-run app flow.
 
 Terminal 1 creates a clean local demo environment:
