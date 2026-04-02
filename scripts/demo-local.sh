@@ -22,8 +22,8 @@ resolve_anvil_bin() {
     return
   fi
 
-  if [[ -x "${HOME}/.foundry/bin/anvil" ]]; then
-    printf '%s\n' "${HOME}/.foundry/bin/anvil"
+  if command -v anvil >/dev/null 2>&1; then
+    command -v anvil
     return
   fi
 

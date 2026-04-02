@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const REPO_ROOT = "/Users/amirshirif/Documents/personal/chatter-blocks";
 const DEPLOYER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -27,10 +27,24 @@ function resolveFoundryBinary(name) {
   }
 
   const preferred = commandName(name);
-  const home = process.env.HOME || os.homedir();
-  const candidates = [
-    path.join(home, ".foundry", "bin", preferred)
-  ];
+
+  const whichResult = spawnSync("bash", ["-lc", `command -v ${preferred}`], {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      NO_PROXY: "127.0.0.1,localhost",
+      FORCE_COLOR: "0"
+    },
+    encoding: "utf8"
+  });
+  if (whichResult.status === 0) {
+    const resolved = String(whichResult.stdout || "").trim();
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  const candidates = [];
 
   const forgeBin = process.env.FORGE_BIN;
   if (forgeBin) {
@@ -628,7 +642,9 @@ test("chat start drives the full Alice/Bob app flow with post, respond, accept, 
       await aliceApp.waitFor("rendezvous worked", { fromIndex: checkpoint });
       checkpoint = aliceApp.stdout.length;
       aliceApp.send("b\n");
-      const aliceHomeReturnSlice = await aliceApp.waitFor("q. Quit", { fromIndex: checkpoint });
+      const aliceHomeReturnSlice = await aliceApp.waitFor(/ChatterBlocks App[\s\S]*1\. Hub[\s\S]*q\. Quit/u, {
+        fromIndex: checkpoint
+      });
       assert.match(aliceHomeReturnSlice, /ChatterBlocks App/);
       assert.match(aliceHomeReturnSlice, /Matches: 1/);
       assert.match(aliceHomeReturnSlice, /Saved contacts: 1/);
