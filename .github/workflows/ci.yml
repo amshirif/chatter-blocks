@@ -32,6 +32,11 @@ jobs:
         with:
           version: stable
 
+      - name: Export Foundry binary paths
+        run: |
+          echo "FORGE_BIN=$(command -v forge)" >> "$GITHUB_ENV"
+          echo "ANVIL_BIN=$(command -v anvil)" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
