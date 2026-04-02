@@ -474,7 +474,9 @@ export function decryptAndValidateInviteResponse({
       decrypted: false,
       envelope: null,
       valid: false,
-      errors: [`missing local key version ${invite.posterKeyVersion.toString()}`],
+      errors: [
+        `missing local key version ${invite.posterKeyVersion.toString()}; restore a prior secret backup to validate this response`
+      ],
       commitmentMatches: false,
       metadataMatches: false
     };

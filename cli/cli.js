@@ -15,6 +15,7 @@ import {
   writeContacts
 } from "./contacts.js";
 import { launchChatApp } from "./app.js";
+import { exportSecretState, importSecretState, inspectSecretState } from "./secrets.js";
 import {
   acceptInviteResponseWorkflow,
   cancelInviteWorkflow,
@@ -96,6 +97,10 @@ function formatFriendlyError(error) {
 
   if (message.includes("Hub state is encrypted")) {
     return `${message} Set CHATTER_PASSPHRASE, pass --passphrase, or rerun \`pnpm chat start\` and enter the passphrase.`;
+  }
+
+  if (message.includes("Secret backup file")) {
+    return `${message} Check \`pnpm chat secrets show\` and verify the backup matches the current chain and wallet.`;
   }
 
   if (message.includes("Unknown recipient address or alias") || message.includes("Unknown conversation address or alias")) {
@@ -291,6 +296,72 @@ addSharedOptions(
   });
   console.log(`Imported contacts from ${options.file}.`);
   console.log(`Contacts: ${contactsPath}`);
+});
+
+const secretsCommand = program.command("secrets").description("Back up and inspect local encrypted chat keys and invite secrets.");
+
+addSharedOptions(
+  secretsCommand
+    .command("export")
+    .description("Export keyring.json and hub.json into a wallet-scoped secret backup file.")
+    .requiredOption("--file <path>", "destination JSON file")
+).action(async (options) => {
+  applyRuntimeOptions(options);
+  const result = await exportSecretState(options, { filePath: options.file });
+  console.log(`Exported local secret state to ${result.filePath}.`);
+  console.log(`Wallet: ${result.walletAddress}`);
+  console.log(`Chain ID: ${result.chainId}`);
+  console.log(`Local state: ${result.stateDir}`);
+  console.log(`Included keyring: ${result.keyringIncluded ? "yes" : "no"}`);
+  console.log(`Included hub state: ${result.hubStateIncluded ? "yes" : "no"}`);
+});
+
+addSharedOptions(
+  secretsCommand
+    .command("import")
+    .description("Replace local keyring.json and hub.json from a wallet-scoped secret backup file.")
+    .requiredOption("--file <path>", "source JSON file")
+).action(async (options) => {
+  applyRuntimeOptions(options);
+  const result = await importSecretState(options, { filePath: options.file });
+  console.log(`Imported local secret state from ${result.filePath}.`);
+  console.log(`Wallet: ${result.walletAddress}`);
+  console.log(`Chain ID: ${result.chainId}`);
+  console.log(`Local state: ${result.stateDir}`);
+  console.log(`Keyring: ${result.keyringPath ?? "(removed)"}`);
+  console.log(`Hub state: ${result.hubPath ?? "(removed)"}`);
+});
+
+addSharedOptions(
+  secretsCommand
+    .command("show")
+    .description("Show whether local chat keys and invite secrets exist, are encrypted, and are currently readable.")
+).action(async (options) => {
+  applyRuntimeOptions(options);
+  const result = await inspectSecretState(options);
+  console.log(`Local state: ${result.stateDir}`);
+  console.log(`Wallet: ${result.walletAddress}`);
+  console.log(`Chain ID: ${result.chainId}`);
+  console.log(`Passphrase active: ${result.passphraseActive ? "yes" : "no"}`);
+  console.log(`keyring.json: ${result.keyring.storage}`);
+  console.log(`keyring readable: ${result.keyring.readable ? "yes" : "no"}`);
+  if (result.keyring.activeKeyVersion !== null) {
+    console.log(`keyring active version: ${result.keyring.activeKeyVersion}`);
+  }
+  if (result.keyring.historicalKeyCount !== null) {
+    console.log(`keyring stored versions: ${result.keyring.historicalKeyCount}`);
+  }
+  if (result.keyring.error) {
+    console.log(`keyring error: ${result.keyring.error}`);
+  }
+  console.log(`hub.json: ${result.hubState.storage}`);
+  console.log(`hub readable: ${result.hubState.readable ? "yes" : "no"}`);
+  if (result.hubState.inviteCount !== null) {
+    console.log(`hub stored invites: ${result.hubState.inviteCount}`);
+  }
+  if (result.hubState.error) {
+    console.log(`hub error: ${result.hubState.error}`);
+  }
 });
 
 const hubCommand = program.command("hub").description("Browse and answer chain-only rendezvous invites.");

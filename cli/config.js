@@ -72,16 +72,12 @@ export function resolveCursor(rawValue) {
 }
 
 export async function createConnections(options) {
-  const rpcUrl = resolveRpcUrl(options);
+  const { rpcUrl, privateKey, account, publicClient, chainId } = await createWalletContext(options);
   const contractAddress = resolveContractAddress(options);
-  const privateKey = resolvePrivateKey(options);
-  const account = privateKeyToAccount(privateKey);
-  const publicClient = createPublicClient({ transport: http(rpcUrl) });
   const walletClient = createWalletClient({
     account,
     transport: http(rpcUrl)
   });
-  const chainId = await publicClient.getChainId();
 
   return {
     rpcUrl,
@@ -90,6 +86,22 @@ export async function createConnections(options) {
     account,
     publicClient,
     walletClient,
+    chainId
+  };
+}
+
+export async function createWalletContext(options) {
+  const rpcUrl = resolveRpcUrl(options);
+  const privateKey = resolvePrivateKey(options);
+  const account = privateKeyToAccount(privateKey);
+  const publicClient = createPublicClient({ transport: http(rpcUrl) });
+  const chainId = await publicClient.getChainId();
+
+  return {
+    rpcUrl,
+    privateKey,
+    account,
+    publicClient,
     chainId
   };
 }

@@ -4,6 +4,14 @@ import { decryptEnvelopeHex } from "./crypto.js";
 import { getChatKeyHistory, getMessageCiphertext, getMessageHeader } from "./contract.js";
 import { getLocalKey } from "./keyring.js";
 
+export function formatMissingLocalKeyMessage(version) {
+  return `[missing local key version ${version.toString()}; restore a prior secret backup to read this history]`;
+}
+
+export function hasMissingLocalKeyMessage(value) {
+  return /missing local key version/i.test(String(value ?? ""));
+}
+
 export function shortAddress(address) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
@@ -56,7 +64,7 @@ export async function decryptMessageRecord({
     return {
       direction: incoming ? "in" : "out",
       decrypted: false,
-      message: `[missing local key version ${localVersion.toString()}]`
+      message: formatMissingLocalKeyMessage(localVersion)
     };
   }
 

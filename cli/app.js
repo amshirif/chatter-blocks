@@ -16,10 +16,17 @@ import {
   validateContactAlias
 } from "./contacts.js";
 import { getHubPath, readHubState } from "./hub.js";
-import { addSeenIds, collectNewMessageIds, hydrateMessages, mergeConversationRecords } from "./messages.js";
+import {
+  addSeenIds,
+  collectNewMessageIds,
+  hasMissingLocalKeyMessage,
+  hydrateMessages,
+  mergeConversationRecords
+} from "./messages.js";
 import { getConversationPage, getInboxPage } from "./contract.js";
 import { getUnreadCount, readAppState, updateAppSettings, upsertConversationState, writeAppState } from "./app-state.js";
 import { getActiveLocalKey, getKeyringPath, localKeyMatchesOnChain, readKeyring } from "./keyring.js";
+import { inspectSecretState } from "./secrets.js";
 import { defaultPassphrase, isEncryptedSecretEnvelope } from "./secret-store.js";
 import { createTimingReport, timeAsync } from "./timing.js";
 import {
@@ -180,6 +187,10 @@ function formatRelativeTime(dateValue) {
   return `${days}d ago`;
 }
 
+function historicalKeyRecoveryNotice() {
+  return "Older history may be unreadable until you restore a prior secret backup containing the missing local key version.";
+}
+
 function messageTimestamp(record, showExactTimestamps) {
   const value = record?.createdAt ?? Number(record?.header?.sentAt ?? 0n) * 1000;
   if (!value) {
@@ -305,6 +316,41 @@ export function formatCopyBlock(label, value) {
 
 export function formatLocalSecretStateLabel(status) {
   return LOCAL_SECRET_STATE_LABELS[status] ?? status;
+}
+
+function secretStorageLabel(storage) {
+  switch (storage) {
+    case "plaintext":
+      return "plaintext";
+    case "encrypted":
+      return "encrypted";
+    default:
+      return "missing";
+  }
+}
+
+function summarizeSecretReadability(label, details) {
+  const lines = [`${label}: ${secretStorageLabel(details.storage)}`];
+
+  if (!details.exists) {
+    lines.push("  status: not present");
+    return lines;
+  }
+
+  lines.push(`  readable now: ${details.readable ? "yes" : "no"}`);
+  if (details.error) {
+    lines.push(`  error: ${details.error}`);
+  }
+
+  return lines;
+}
+
+function hasHistoricalKeyRecoveryIssue(records = []) {
+  return records.some((record) => hasMissingLocalKeyMessage(record?.message));
+}
+
+function hasHistoricalKeyRecoveryIssueInSummaries(summaries = []) {
+  return summaries.some((summary) => hasMissingLocalKeyMessage(summary?.lastRecord?.message));
 }
 
 function renderNotices({ notice, error }) {
@@ -1292,6 +1338,9 @@ async function openConversationScreen(rl, options, peerReference, { backTarget =
     console.log(`Peer: ${formatContactLabel(thread.contacts, thread.peerAddress)} (${thread.peerAddress})`);
     console.log(`Fingerprint: ${contactInfo.fingerprint}`);
     console.log(`Verified: ${contactInfo.contact?.verified ? "yes" : "no"}`);
+    if (hasHistoricalKeyRecoveryIssue(thread.records)) {
+      console.log(`Recovery note: ${historicalKeyRecoveryNotice()}`);
+    }
     console.log(divider("Messages"));
 
     if (thread.records.length === 0) {
@@ -2437,7 +2486,8 @@ async function openSettingsScreen(rl, options, { sessionCache = null } = {}) {
 
     renderNotices({ notice, error });
     const actions = [
-      { key: "1", label: "Toggle timestamps", value: "toggle-timestamps" }
+      { key: "1", label: "Toggle timestamps", value: "toggle-timestamps" },
+      { key: "2", label: "Show local secret state", value: "show-local-secret-state" }
     ];
     renderActionFooter(actions);
 
@@ -2451,6 +2501,27 @@ async function openSettingsScreen(rl, options, { sessionCache = null } = {}) {
 
     if (selection.type === "invalid") {
       error = selection.error;
+      continue;
+    }
+
+    if (selection.action.value === "show-local-secret-state") {
+      const secretState = await inspectSecretState({ chainId, walletAddress });
+      const infoLines = [
+        `Local state dir: ${secretState.stateDir}`,
+        `Passphrase active: ${secretState.passphraseActive ? "yes" : "no"}`,
+        ...summarizeSecretReadability("keyring.json", secretState.keyring),
+        `  active key version: ${secretState.keyring.activeKeyVersion ?? "unavailable"}`,
+        `  stored key versions: ${secretState.keyring.historicalKeyCount ?? "unavailable"}`,
+        ...summarizeSecretReadability("hub.json", secretState.hubState),
+        `  stored invites: ${secretState.hubState.inviteCount ?? "unavailable"}`
+      ];
+      await showInfoScreen(
+        rl,
+        "Local Secret State",
+        infoLines,
+        [{ key: "1", label: "Back to settings", value: "back" }],
+        { allowBack: true }
+      );
       continue;
     }
 
@@ -2513,6 +2584,9 @@ export async function launchChatApp(baseOptions, { runWizard = false, rotate = f
       console.log(`Contract: ${home.health.contractAddress}`);
       console.log(`Status: ${describeHealthStatus(home.health.status)}`);
       console.log(`Local secrets: ${formatLocalSecretStateLabel(home.health.localSecretState.status)}`);
+      if (hasHistoricalKeyRecoveryIssueInSummaries(home.summaries)) {
+        console.log(`Recovery note: ${historicalKeyRecoveryNotice()}`);
+      }
       if (wizardMessage) {
         console.log(`Last action: ${wizardMessage}`);
       }
