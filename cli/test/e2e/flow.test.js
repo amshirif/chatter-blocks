@@ -659,6 +659,114 @@ test("chat start drives the full Alice/Bob app flow with post, respond, accept, 
   });
 });
 
+test("conversation refresh pulls in new peer messages without breaking navigation", E2E_TEST_OPTIONS, async () => {
+  await withLocalChain(async ({ aliceEnv, bobEnv }) => {
+    await runCommand(commandName("pnpm"), ["chat", "setup"], { env: aliceEnv });
+    await runCommand(commandName("pnpm"), ["chat", "setup"], { env: bobEnv });
+
+    const aliceApp = createInteractiveSession(commandName("pnpm"), ["chat", "start"], {
+      env: aliceEnv,
+      timeoutMs: 120_000
+    });
+
+    try {
+      let checkpoint = 0;
+      await aliceApp.waitFor("Select action:", { fromIndex: checkpoint });
+
+      checkpoint = aliceApp.stdout.length;
+      aliceApp.send("4\n");
+      await aliceApp.waitFor("Address or alias:", { fromIndex: checkpoint });
+
+      checkpoint = aliceApp.stdout.length;
+      aliceApp.send(`${BOB_ADDRESS}\n`);
+      const conversationSlice = await aliceApp.waitFor("Select action:", { fromIndex: checkpoint });
+      assert.match(conversationSlice, /Conversation/);
+      assert.match(conversationSlice, /No messages yet\./);
+
+      await runCommand(commandName("pnpm"), [
+        "chat", "send",
+        "--to", ALICE_ADDRESS,
+        "--message", "incremental refresh works"
+      ], { env: bobEnv });
+
+      checkpoint = aliceApp.stdout.length;
+      aliceApp.send("5\n");
+      const refreshedSlice = await aliceApp.waitFor("incremental refresh works", { fromIndex: checkpoint });
+      assert.match(refreshedSlice, /incremental refresh works/);
+
+      checkpoint = aliceApp.stdout.length;
+      aliceApp.send("b\n");
+      const homeSlice = await aliceApp.waitFor(/ChatterBlocks App[\s\S]*1\. Hub[\s\S]*q\. Quit/u, {
+        fromIndex: checkpoint
+      });
+      assert.match(homeSlice, /ChatterBlocks App/);
+      assert.doesNotMatch(aliceApp.stderr, /readline was closed/);
+    } finally {
+      await aliceApp.quit();
+    }
+  });
+});
+
+test("CHATTER_TIMING emits stable timing lines to stderr during home and conversation refresh", E2E_TEST_OPTIONS, async () => {
+  await withLocalChain(async ({ aliceEnv, bobEnv }) => {
+    await runCommand(commandName("pnpm"), ["chat", "setup"], { env: aliceEnv });
+    await runCommand(commandName("pnpm"), ["chat", "setup"], { env: bobEnv });
+
+    const aliceApp = createInteractiveSession(commandName("pnpm"), ["chat", "start"], {
+      env: {
+        ...aliceEnv,
+        CHATTER_TIMING: "1"
+      },
+      timeoutMs: 120_000
+    });
+
+    try {
+      let checkpoint = 0;
+      await aliceApp.waitFor("Select action:", { fromIndex: checkpoint });
+
+      checkpoint = aliceApp.stdout.length;
+      aliceApp.send("4\n");
+      await aliceApp.waitFor("Address or alias:", { fromIndex: checkpoint });
+
+      checkpoint = aliceApp.stdout.length;
+      aliceApp.send(`${BOB_ADDRESS}\n`);
+      await aliceApp.waitFor("Select action:", { fromIndex: checkpoint });
+
+      await runCommand(commandName("pnpm"), [
+        "chat", "send",
+        "--to", ALICE_ADDRESS,
+        "--message", "timing refresh works"
+      ], { env: bobEnv });
+
+      checkpoint = aliceApp.stdout.length;
+      aliceApp.send("5\n");
+      await aliceApp.waitFor("timing refresh works", { fromIndex: checkpoint });
+      await aliceApp.quit();
+
+      assert.match(
+        aliceApp.stderr,
+        /^timing app\.renderHome total=\d+ms matches=\d+ms summaries=\d+ms activeInvites=\d+ms$/m
+      );
+      assert.match(
+        aliceApp.stderr,
+        /^timing app\.openConversation total=\d+ms thread=\d+ms contact=\d+ms(?: writeSeenState=\d+ms)?$/m
+      );
+      assert.match(
+        aliceApp.stderr,
+        /^timing wf\.readInbox total=\d+ms(?: conversationPage=\d+ms)? headersAndCiphertexts=\d+ms hydrate=\d+ms$/m
+      );
+      assert.doesNotMatch(aliceApp.stdout, /^timing /m);
+      assert.doesNotMatch(aliceApp.stderr, /readline was closed/);
+    } finally {
+      try {
+        await aliceApp.quit();
+      } catch {
+        // Session may already be closed.
+      }
+    }
+  });
+});
+
 test("chat start prompts to unlock encrypted local state before health inspection", E2E_TEST_OPTIONS, async () => {
   await withLocalChain(async ({ aliceEnv }) => {
     const encryptedEnv = {

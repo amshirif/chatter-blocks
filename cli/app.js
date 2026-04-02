@@ -16,11 +16,12 @@ import {
   validateContactAlias
 } from "./contacts.js";
 import { getHubPath, readHubState } from "./hub.js";
-import { hydrateMessages } from "./messages.js";
-import { getConversationId, getConversationPage, getInboxPage } from "./contract.js";
+import { addSeenIds, collectNewMessageIds, hydrateMessages, mergeConversationRecords } from "./messages.js";
+import { getConversationPage, getInboxPage } from "./contract.js";
 import { getUnreadCount, readAppState, updateAppSettings, upsertConversationState, writeAppState } from "./app-state.js";
 import { getActiveLocalKey, getKeyringPath, localKeyMatchesOnChain, readKeyring } from "./keyring.js";
 import { defaultPassphrase, isEncryptedSecretEnvelope } from "./secret-store.js";
+import { createTimingReport, timeAsync } from "./timing.js";
 import {
   cancelInviteWorkflow,
   decodeInviteShareCode,
@@ -59,6 +60,71 @@ class QuitAppError extends Error {
 
 function clearScreen() {
   output.write("\x1bc");
+}
+
+const SESSION_CACHE_GROUPS = {
+  homeContent: ["home", "homeSummaries"],
+  homeView: ["health", "homeSummaries", "home"],
+  contactsView: ["health", "contacts", "homeSummaries", "home"],
+  hubView: ["health", "hubState", "matches", "homeSummaries", "home"],
+  all: ["health", "contacts", "hubState", "matches", "homeSummaries", "home"]
+};
+
+export function createAppSessionCache() {
+  return {
+    health: null,
+    contacts: null,
+    hubState: null,
+    matches: null,
+    homeSummaries: null,
+    home: null
+  };
+}
+
+function invalidateSessionCache(sessionCache, keys = []) {
+  if (!sessionCache) {
+    return;
+  }
+
+  for (const key of keys) {
+    sessionCache[key] = null;
+  }
+}
+
+export function invalidateSessionCacheByGroup(sessionCache, groups = []) {
+  const keys = new Set();
+
+  for (const group of groups) {
+    const groupKeys = SESSION_CACHE_GROUPS[group] ?? [group];
+    for (const key of groupKeys) {
+      keys.add(key);
+    }
+  }
+
+  invalidateSessionCache(sessionCache, [...keys]);
+}
+
+function cacheHealth(sessionCache, health) {
+  if (!sessionCache) {
+    return;
+  }
+
+  sessionCache.health = health;
+  sessionCache.contacts = health.contacts;
+  sessionCache.hubState = health.hubState;
+}
+
+function cacheHome(sessionCache, home) {
+  if (!sessionCache) {
+    return;
+  }
+
+  sessionCache.home = home;
+  sessionCache.health = home.health;
+  sessionCache.contacts = home.health.contacts;
+  sessionCache.hubState = home.health.hubState;
+  sessionCache.matches = home.matches;
+  sessionCache.homeSummaries = home.summaries;
 }
 
 function divider(label = "") {
@@ -130,6 +196,52 @@ function conversationPreview(record) {
 
   const prefix = record.direction === "out" ? "you: " : "";
   return truncate(`${prefix}${record.decrypted ? record.text : record.message}`, 44);
+}
+
+function conversationStatePreviewRecord(conversationState) {
+  if (!conversationState?.lastMessageBody) {
+    return null;
+  }
+
+  return {
+    direction: conversationState.lastMessageDirection ?? "in",
+    decrypted: true,
+    text: conversationState.lastMessageBody,
+    createdAt: conversationState.lastMessageCreatedAt ?? null,
+    message: conversationState.lastMessageBody
+  };
+}
+
+function extractConversationSummaryFields(record) {
+  return {
+    lastMessageDirection: record?.direction ?? null,
+    lastMessageBody: record?.decrypted ? record?.text ?? null : record?.message ?? null,
+    lastMessageCreatedAt: record?.createdAt ?? null
+  };
+}
+
+function createOptimisticOutgoingRecord({ sentMessage, senderAddress, recipientAddress, text }) {
+  const createdAt = Date.now();
+
+  return {
+    messageId: BigInt(sentMessage.messageId),
+    header: {
+      conversationId: sentMessage.conversationId,
+      sender: getAddress(senderAddress),
+      recipient: getAddress(recipientAddress),
+      sentAt: BigInt(Math.floor(createdAt / 1000)),
+      blockNumber: 0n,
+      senderKeyVersion: 0n,
+      recipientKeyVersion: 0n,
+      nonce: "0x",
+      ciphertextHash: "0x"
+    },
+    ciphertextHex: "0x",
+    direction: "out",
+    decrypted: true,
+    text,
+    createdAt
+  };
 }
 
 function normalizeChoice(rawValue) {
@@ -736,68 +848,77 @@ async function ensureUnlockedLocalState(options, rl, { interactive }) {
   }
 }
 
-async function inspectHealth(options) {
-  const { publicClient, account, chainId, contractAddress, rpcUrl } = await createConnections(options);
-  const walletAddress = getAddress(account.address);
-  const localSecretState = await inspectLocalSecretState({ chainId, walletAddress });
-  const keyring = await readKeyring({ chainId, walletAddress });
-  const onChainKey = await publicClient.readContract({
-    address: contractAddress,
-    abi: [
-      {
-        type: "function",
-        name: "activeChatKeys",
-        stateMutability: "view",
-        inputs: [{ name: "account", type: "address" }],
-        outputs: [
-          { name: "version", type: "uint64" },
-          { name: "pubKey", type: "bytes32" }
-        ]
-      }
-    ],
-    functionName: "activeChatKeys",
-    args: [walletAddress]
-  });
-  const localKey = getActiveLocalKey(keyring);
-  const matchesLocal = keyring
-    ? localKeyMatchesOnChain({
-      keyring,
-      onChainVersion: onChainKey[0],
-      onChainPubKey: onChainKey[1]
-    })
-    : false;
-  const contacts = await readContacts({ chainId, walletAddress });
-  const hubState = await readHubState({ chainId, walletAddress });
-  const appState = await readAppState({ chainId, walletAddress });
-
-  let status = "ready";
-  if (!keyring) {
-    status = "missing-local-keyring";
-  } else if (!localKey) {
-    status = "missing-local-key";
-  } else if (BigInt(onChainKey[0]) === 0n) {
-    status = "missing-onchain-key";
-  } else if (!matchesLocal) {
-    status = "key-mismatch";
+async function inspectHealth(options, { connections = null, sessionCache = null, force = false } = {}) {
+  if (!force && sessionCache?.health) {
+    return sessionCache.health;
   }
 
-  return {
-    status,
-    rpcUrl,
-    contractAddress,
-    chainId,
-    walletAddress,
-    keyring,
-    localKey,
-    onChainKey: {
-      version: BigInt(onChainKey[0]),
-      pubKey: onChainKey[1]
-    },
-    localSecretState,
-    contacts,
-    hubState,
-    appState
-  };
+  const health = await timeAsync("app.inspectHealth", async () => {
+    const { publicClient, account, chainId, contractAddress, rpcUrl } = connections ?? await createConnections(options);
+    const walletAddress = getAddress(account.address);
+    const localSecretState = await inspectLocalSecretState({ chainId, walletAddress });
+    const keyring = await readKeyring({ chainId, walletAddress });
+    const onChainKey = await publicClient.readContract({
+      address: contractAddress,
+      abi: [
+        {
+          type: "function",
+          name: "activeChatKeys",
+          stateMutability: "view",
+          inputs: [{ name: "account", type: "address" }],
+          outputs: [
+            { name: "version", type: "uint64" },
+            { name: "pubKey", type: "bytes32" }
+          ]
+        }
+      ],
+      functionName: "activeChatKeys",
+      args: [walletAddress]
+    });
+    const localKey = getActiveLocalKey(keyring);
+    const matchesLocal = keyring
+      ? localKeyMatchesOnChain({
+        keyring,
+        onChainVersion: onChainKey[0],
+        onChainPubKey: onChainKey[1]
+      })
+      : false;
+    const contacts = await readContacts({ chainId, walletAddress });
+    const hubState = await readHubState({ chainId, walletAddress });
+    const appState = await readAppState({ chainId, walletAddress });
+
+    let status = "ready";
+    if (!keyring) {
+      status = "missing-local-keyring";
+    } else if (!localKey) {
+      status = "missing-local-key";
+    } else if (BigInt(onChainKey[0]) === 0n) {
+      status = "missing-onchain-key";
+    } else if (!matchesLocal) {
+      status = "key-mismatch";
+    }
+
+    return {
+      status,
+      rpcUrl,
+      contractAddress,
+      chainId,
+      walletAddress,
+      keyring,
+      localKey,
+      onChainKey: {
+        version: BigInt(onChainKey[0]),
+        pubKey: onChainKey[1]
+      },
+      localSecretState,
+      contacts,
+      hubState,
+      appState
+    };
+  });
+
+  cacheHealth(sessionCache, health);
+  return health;
 }
 
 async function runSetupWizard(options, rl, { rotate = false } = {}) {
@@ -877,10 +998,10 @@ async function runSetupWizard(options, rl, { rotate = false } = {}) {
   };
 }
 
-async function buildConversationSummaries(options, { matchesData, contacts, appState }) {
-  const { publicClient, account, chainId, contractAddress } = await createConnections(options);
+async function buildConversationSummaries(options, { matchesData, contacts, appState, connections = null, keyring = null }) {
+  const { publicClient, account, chainId, contractAddress } = connections ?? await createConnections(options);
   const viewerAddress = getAddress(account.address);
-  const keyring = await loadKeyringOrThrow({ chainId, walletAddress: viewerAddress });
+  const resolvedKeyring = keyring ?? await loadKeyringOrThrow({ chainId, walletAddress: viewerAddress });
   const inboxIds = await getInboxPage(publicClient, contractAddress, viewerAddress, 0n, 25n);
   const inboxRecords = inboxIds.length === 0
     ? []
@@ -888,7 +1009,7 @@ async function buildConversationSummaries(options, { matchesData, contacts, appS
       publicClient,
       contractAddress,
       viewerAddress,
-      keyring,
+      keyring: resolvedKeyring,
       messageIds: inboxIds
     });
   const peerSet = new Set([
@@ -929,22 +1050,9 @@ async function buildConversationSummaries(options, { matchesData, contacts, appS
     const peerAddress = getAddress(peerWalletAddress);
     const peerKey = peerAddress.toLowerCase();
     const inboxPeerRecords = inboxRecordsByPeer.get(peerKey) ?? [];
-    let lastRecord = latestInboxRecordByPeer.get(peerKey) ?? null;
-
-    if (!lastRecord) {
-      const conversationId = await getConversationId(publicClient, contractAddress, viewerAddress, peerAddress);
-      const messageIds = await getConversationPage(publicClient, contractAddress, conversationId, 0n, 1n);
-      const records = messageIds.length === 0
-        ? []
-        : await hydrateMessages({
-          publicClient,
-          contractAddress,
-          viewerAddress,
-          keyring,
-          messageIds
-        });
-      lastRecord = records.at(-1) ?? null;
-    }
+    const lastRecord = latestInboxRecordByPeer.get(peerKey)
+      ?? conversationStatePreviewRecord(appState?.conversations?.[peerKey])
+      ?? null;
     const contact = getContact(contacts, peerAddress);
 
     summaries.push({
@@ -968,32 +1076,53 @@ async function buildConversationSummaries(options, { matchesData, contacts, appS
   });
 }
 
-async function renderHome(options) {
-  const health = await inspectHealth(options);
+async function renderHome(options, { sessionCache = null, force = false } = {}) {
+  if (!force && sessionCache?.home) {
+    return sessionCache.home;
+  }
+
+  const timing = createTimingReport("app.renderHome");
+  const connections = await createConnections(options);
+  const health = await inspectHealth(options, { connections, sessionCache, force });
 
   if (health.status !== "ready") {
-    return {
+    const result = {
       health,
       summaries: [],
       matches: { matches: [] },
       activeInvites: { entries: [] }
     };
+    cacheHome(sessionCache, result);
+    timing.flush();
+    return result;
   }
 
-  const matches = await listInviteMatchesWorkflow(options);
-  const summaries = await buildConversationSummaries(options, {
+  const matches = await timing.measure("matches", async () => await listInviteMatchesWorkflow(options, {
+    connections,
+    hubState: health.hubState,
+    contacts: health.contacts
+  }));
+  const summaries = await timing.measure("summaries", async () => await buildConversationSummaries(options, {
     matchesData: matches,
     contacts: health.contacts,
-    appState: health.appState
-  });
-  const activeInvites = await listActiveInvitesWorkflow(options, { cursor: 0n, limit: 8 });
+    appState: health.appState,
+    connections,
+    keyring: health.keyring
+  }));
+  const activeInvites = await timing.measure(
+    "activeInvites",
+    async () => await listActiveInvitesWorkflow(options, { cursor: 0n, limit: 8 }, { connections })
+  );
 
-  return {
+  const result = {
     health,
     summaries,
     matches,
     activeInvites
   };
+  cacheHome(sessionCache, result);
+  timing.flush();
+  return result;
 }
 
 export function buildConversationActions(summaries, { startKey = 7 } = {}) {
@@ -1034,37 +1163,128 @@ function renderConversationList({ summaries, contacts, showExactTimestamps, star
   }
 }
 
-async function openConversationScreen(rl, options, peerReference, { backTarget = null } = {}) {
+async function openConversationScreen(rl, options, peerReference, { backTarget = null, sessionCache = null } = {}) {
   let notice = "";
   let error = "";
-  let cachedContactInfo = null;
+  const connections = await createConnections(options);
+  const walletAddress = getAddress(connections.account.address);
+  const { chainId, publicClient, contractAddress } = connections;
+  const keyring = await loadKeyringOrThrow({ chainId, walletAddress });
+  let contacts = sessionCache?.contacts ?? await readContacts({ chainId, walletAddress });
+  let appState = await readAppState({ chainId, walletAddress });
+  let thread = null;
+  let contactInfo = null;
+  let threadLoadMode = "full";
 
-  for (;;) {
-    const thread = await readInboxWorkflow(options, {
+  async function loadFullThread() {
+    return await readInboxWorkflow(options, {
       peerReference,
       cursor: 0n,
-      limit: 25
+      limit: 25,
+      connections,
+      keyring,
+      contacts
     });
-    const health = await inspectHealth(options);
-    const appState = health.appState;
-    const contactInfo = cachedContactInfo ?? await showContactWorkflow(options, { reference: thread.peerAddress });
-    const latestMessageId = thread.records.at(-1)?.messageId ?? null;
-    let nextAppState = appState;
+  }
 
-    if (latestMessageId) {
+  async function refreshThreadIncrementally(currentThread) {
+    if (!currentThread?.conversationId) {
+      return await loadFullThread();
+    }
+
+    const seenIds = new Set();
+    addSeenIds(seenIds, currentThread.records.map((record) => record.messageId));
+    const incrementalTiming = createTimingReport("wf.readInbox");
+    try {
+      const newMessageIds = await incrementalTiming.measure(
+        "conversationPage",
+        async () => await collectNewMessageIds({
+          fetchPage: async (cursor) => await getConversationPage(
+            publicClient,
+            contractAddress,
+            currentThread.conversationId,
+            cursor,
+            25n
+          ),
+          seenIds,
+          pageSize: 25n
+        })
+      );
+
+      if (newMessageIds.length === 0) {
+        incrementalTiming.flush();
+        return currentThread;
+      }
+
+      const newRecords = await hydrateMessages({
+        publicClient,
+        contractAddress,
+        viewerAddress: walletAddress,
+        keyring,
+        messageIds: newMessageIds,
+        timingReport: incrementalTiming
+      });
+      const mergedRecords = mergeConversationRecords(currentThread.records, newRecords);
+      addSeenIds(seenIds, newRecords.map((record) => record.messageId));
+      incrementalTiming.flush();
+
+      return {
+        ...currentThread,
+        records: mergedRecords
+      };
+    } catch {
+      incrementalTiming.flush();
+      return await loadFullThread();
+    }
+  }
+
+  for (;;) {
+    const timing = createTimingReport("app.openConversation");
+
+    if (!thread || threadLoadMode === "full") {
+      thread = await timing.measure("thread", async () => await loadFullThread());
+      threadLoadMode = null;
+    } else if (threadLoadMode === "incremental") {
+      thread = await timing.measure("thread", async () => await refreshThreadIncrementally(thread));
+      threadLoadMode = null;
+    }
+
+    if (!contactInfo || !contactInfo.peerAddress || contactInfo.peerAddress.toLowerCase() !== thread.peerAddress.toLowerCase()) {
+      contactInfo = await timing.measure("contact", async () => await showContactWorkflow(options, {
+        reference: thread.peerAddress,
+        connections,
+        contacts
+      }));
+    }
+
+    const latestRecord = thread.records.at(-1) ?? null;
+    const latestMessageId = latestRecord?.messageId ?? null;
+    let nextAppState = appState;
+    const conversationState = nextAppState?.conversations?.[thread.peerAddress.toLowerCase()] ?? null;
+    const shouldWriteSeenState = latestMessageId && (
+      String(conversationState?.lastSeenMessageId ?? "") !== latestMessageId.toString() ||
+      conversationState?.lastMessageBody !== extractConversationSummaryFields(latestRecord).lastMessageBody ||
+      conversationState?.lastMessageDirection !== extractConversationSummaryFields(latestRecord).lastMessageDirection ||
+      Number(conversationState?.lastMessageCreatedAt ?? 0) !== Number(extractConversationSummaryFields(latestRecord).lastMessageCreatedAt ?? 0)
+    );
+
+    if (shouldWriteSeenState) {
       nextAppState = upsertConversationState({
         appState,
-        chainId: health.chainId,
-        walletAddress: health.walletAddress,
+        chainId,
+        walletAddress,
         peerWalletAddress: thread.peerAddress,
         lastSeenMessageId: latestMessageId,
-        lastOpenedAt: new Date().toISOString()
+        lastOpenedAt: new Date().toISOString(),
+        ...extractConversationSummaryFields(latestRecord)
       });
-      await writeAppState({
-        chainId: health.chainId,
-        walletAddress: health.walletAddress,
+      await timing.measure("writeSeenState", async () => await writeAppState({
+        chainId,
+        walletAddress,
         appState: nextAppState
-      });
+      }));
+      appState = nextAppState;
+      invalidateSessionCacheByGroup(sessionCache, ["homeContent"]);
     }
 
     clearScreen();
@@ -1100,6 +1320,7 @@ async function openConversationScreen(rl, options, peerReference, { backTarget =
       { key: "5", label: "Refresh", value: "refresh" }
     ];
     renderActionFooter(actions);
+    timing.flush();
 
     const selection = await promptMenuChoice(rl, actions, { prompt: "Select action" });
     notice = "";
@@ -1115,6 +1336,8 @@ async function openConversationScreen(rl, options, peerReference, { backTarget =
     }
 
     if (selection.action.value === "refresh") {
+      threadLoadMode = "incremental";
+      invalidateSessionCacheByGroup(sessionCache, ["homeContent"]);
       continue;
     }
 
@@ -1136,16 +1359,18 @@ async function openConversationScreen(rl, options, peerReference, { backTarget =
 
       nextAppState = upsertConversationState({
         appState: nextAppState,
-        chainId: health.chainId,
-        walletAddress: health.walletAddress,
+        chainId,
+        walletAddress,
         peerWalletAddress: thread.peerAddress,
         draft
       });
       await writeAppState({
-        chainId: health.chainId,
-        walletAddress: health.walletAddress,
+        chainId,
+        walletAddress,
         appState: nextAppState
       });
+      invalidateSessionCacheByGroup(sessionCache, ["homeContent"]);
+      appState = nextAppState;
       notice = "Draft updated.";
       continue;
     }
@@ -1169,18 +1394,39 @@ async function openConversationScreen(rl, options, peerReference, { backTarget =
           recipientReference: thread.peerAddress,
           message: text
         });
+        contacts = sent.contacts;
+        contactInfo = {
+          ...contactInfo,
+          contact: getContact(sent.contacts, thread.peerAddress) ?? contactInfo.contact
+        };
+        const optimisticRecord = createOptimisticOutgoingRecord({
+          sentMessage: sent.sentMessage,
+          senderAddress: sent.senderAddress,
+          recipientAddress: sent.recipientAddress,
+          text
+        });
+        thread = {
+          ...thread,
+          records: mergeConversationRecords(thread.records, [optimisticRecord])
+        };
         nextAppState = upsertConversationState({
           appState: nextAppState,
-          chainId: health.chainId,
-          walletAddress: health.walletAddress,
+          chainId,
+          walletAddress,
           peerWalletAddress: thread.peerAddress,
-          draft: ""
+          draft: "",
+          lastSeenMessageId: optimisticRecord.messageId,
+          lastOpenedAt: new Date().toISOString(),
+          ...extractConversationSummaryFields(optimisticRecord)
         });
         await writeAppState({
-          chainId: health.chainId,
-          walletAddress: health.walletAddress,
+          chainId,
+          walletAddress,
           appState: nextAppState
         });
+        appState = nextAppState;
+        invalidateSessionCacheByGroup(sessionCache, ["contactsView"]);
+        sessionCache && (sessionCache.contacts = sent.contacts);
         notice = `Sent message ${sent.sentMessage.messageId.toString()}.`;
       } catch (workflowError) {
         error = workflowError?.message || String(workflowError);
@@ -1223,13 +1469,19 @@ async function openConversationScreen(rl, options, peerReference, { backTarget =
       }
 
       try {
-        await saveContactWorkflow(options, {
+        const saved = await saveContactWorkflow(options, {
           address: thread.peerAddress,
           alias,
           notes,
-          chainLabel: String(health.chainId)
+          chainLabel: String(chainId)
         });
-        cachedContactInfo = null;
+        contacts = await readContacts({ chainId, walletAddress });
+        contactInfo = {
+          ...contactInfo,
+          contact: saved.contact
+        };
+        invalidateSessionCacheByGroup(sessionCache, ["contactsView"]);
+        sessionCache && (sessionCache.contacts = contacts);
         notice = "Contact saved.";
       } catch (workflowError) {
         error = workflowError?.message || String(workflowError);
@@ -1240,7 +1492,15 @@ async function openConversationScreen(rl, options, peerReference, { backTarget =
     if (selection.action.value === "verify-contact") {
       try {
         const result = await verifyContactWorkflow(options, { reference: thread.peerAddress });
-        cachedContactInfo = null;
+        contacts = await readContacts({ chainId, walletAddress });
+        contactInfo = {
+          ...contactInfo,
+          contact: result.contact,
+          activeChatKey: result.activeChatKey,
+          fingerprint: formatChatKeyFingerprint(result.activeChatKey.pubKey)
+        };
+        invalidateSessionCacheByGroup(sessionCache, ["contactsView"]);
+        sessionCache && (sessionCache.contacts = contacts);
         notice = `Verified ${result.contact.alias ?? result.contact.address}.`;
       } catch (workflowError) {
         error = workflowError?.message || String(workflowError);
@@ -1418,7 +1678,7 @@ async function chooseInviteFromList(rl, title, invites, emptyMessage) {
   }
 }
 
-async function openInviteReviewScreen(rl, options, health) {
+async function openInviteReviewScreen(rl, options, health, { sessionCache = null } = {}) {
   const selectedInvite = await chooseInviteFromList(
     rl,
     "Review Invite Responses",
@@ -1520,6 +1780,7 @@ async function openInviteReviewScreen(rl, options, health) {
         inviteId: selectedInvite.inviteId,
         responseId: response.responseId
       });
+      invalidateSessionCacheByGroup(sessionCache, ["all"]);
       const nextAction = await showInfoScreen(rl, "Match Accepted", [
         `Peer wallet: ${accepted.acceptedMatch.responder}`,
         `Peer key version: ${accepted.matchRecord.responderKeyVersion.toString()}`,
@@ -1546,11 +1807,23 @@ async function openInviteReviewScreen(rl, options, health) {
   }
 }
 
-async function openMatchesScreen(rl, options) {
+async function openMatchesScreen(rl, options, { sessionCache = null } = {}) {
   let error = "";
+  let matches = null;
+
+  async function loadMatches() {
+    const timing = createTimingReport("app.openMatchesScreen");
+    matches = await timing.measure("matches", async () => await listInviteMatchesWorkflow(options));
+    if (sessionCache) {
+      sessionCache.matches = matches;
+    }
+    timing.flush();
+  }
 
   for (;;) {
-    const matches = await listInviteMatchesWorkflow(options);
+    if (!matches) {
+      await loadMatches();
+    }
     clearScreen();
     console.log(divider("Matches"));
 
@@ -1585,26 +1858,38 @@ async function openMatchesScreen(rl, options) {
       continue;
     }
 
-    const nextRoute = await openConversationScreen(rl, options, selection.action.value);
+    const nextRoute = await openConversationScreen(rl, options, selection.action.value, { sessionCache });
     if (nextRoute === ROUTE_HOME) {
       return ROUTE_HOME;
     }
   }
 }
 
-async function openHubScreen(rl, options) {
+async function openHubScreen(rl, options, { sessionCache = null } = {}) {
   let notice = "";
   let error = "";
 
   for (;;) {
-    const health = await inspectHealth(options);
+    const timing = createTimingReport("app.openHub");
+    const connections = await createConnections(options);
+    const health = await inspectHealth(options, { connections, sessionCache });
     const blocked = requireReadyStatus(health, "use the hub");
     const activeInvites = blocked
       ? { entries: [] }
-      : await listActiveInvitesWorkflow(options, { cursor: 0n, limit: 8 });
+      : await timing.measure(
+        "activeInvites",
+        async () => await listActiveInvitesWorkflow(options, { cursor: 0n, limit: 8 }, { connections })
+      );
     const matches = blocked
       ? { matches: [] }
-      : await listInviteMatchesWorkflow(options);
+      : await timing.measure("matches", async () => await listInviteMatchesWorkflow(options, {
+        connections,
+        hubState: health.hubState,
+        contacts: health.contacts
+      }));
+    if (sessionCache) {
+      sessionCache.matches = matches;
+    }
     const myInvites = getPosterInvites(health.hubState);
 
     clearScreen();
@@ -1646,6 +1931,7 @@ async function openHubScreen(rl, options) {
       { key: "7", label: "Refresh", value: "refresh" }
     ];
     renderActionFooter(actions);
+    timing.flush();
 
     const selection = await promptMenuChoice(rl, actions, { prompt: "Select action" });
     notice = "";
@@ -1661,6 +1947,7 @@ async function openHubScreen(rl, options) {
     }
 
     if (selection.action.value === "refresh") {
+      invalidateSessionCacheByGroup(sessionCache, ["hubView"]);
       notice = "Hub refreshed.";
       continue;
     }
@@ -1676,6 +1963,7 @@ async function openHubScreen(rl, options) {
         if (posted === BACK) {
           continue;
         }
+        invalidateSessionCacheByGroup(sessionCache, ["hubView"]);
 
         const shareBundle = decodeInviteShareCode(posted.shareCode);
         const bundleAction = await showInviteBundleScreen(rl, {
@@ -1706,6 +1994,7 @@ async function openHubScreen(rl, options) {
         if (response === BACK) {
           continue;
         }
+        invalidateSessionCacheByGroup(sessionCache, ["hubView"]);
 
         const infoAction = await showInfoScreen(rl, "Invite Response Submitted", [
           `Invite: ${response.inviteDetails.poster}`,
@@ -1725,7 +2014,7 @@ async function openHubScreen(rl, options) {
     }
 
     if (selection.action.value === "review") {
-      const reviewResult = await openInviteReviewScreen(rl, options, health);
+      const reviewResult = await openInviteReviewScreen(rl, options, health, { sessionCache });
       if (reviewResult === ROUTE_HOME) {
         return ROUTE_HOME;
       }
@@ -1734,7 +2023,7 @@ async function openHubScreen(rl, options) {
           rl,
           options,
           reviewResult.peerAddress,
-          { backTarget: reviewResult.backTarget ?? null }
+          { backTarget: reviewResult.backTarget ?? null, sessionCache }
         );
         if (nextRoute === ROUTE_HOME) {
           return ROUTE_HOME;
@@ -1745,7 +2034,7 @@ async function openHubScreen(rl, options) {
     }
 
     if (selection.action.value === "matches") {
-      const nextRoute = await openMatchesScreen(rl, options);
+      const nextRoute = await openMatchesScreen(rl, options, { sessionCache });
       if (nextRoute === ROUTE_HOME) {
         return ROUTE_HOME;
       }
@@ -1775,6 +2064,7 @@ async function openHubScreen(rl, options) {
 
       try {
         await cancelInviteWorkflow(options, { inviteId: invite.inviteId });
+        invalidateSessionCacheByGroup(sessionCache, ["hubView"]);
         notice = `Cancelled invite ${invite.inviteId}.`;
       } catch (workflowError) {
         error = workflowError?.message || String(workflowError);
@@ -1801,12 +2091,37 @@ async function openHubScreen(rl, options) {
   }
 }
 
-async function openContactDetailScreen(rl, options, reference) {
+async function openContactDetailScreen(rl, options, reference, { sessionCache = null } = {}) {
   let notice = "";
   let error = "";
+  const connections = await createConnections(options);
+  const walletAddress = getAddress(connections.account.address);
+  const { chainId } = connections;
+  let contact = null;
+  let contacts = null;
+
+  async function loadContact({ forceContacts = false } = {}) {
+    const timing = createTimingReport("app.openContactDetailScreen");
+    if (forceContacts || !contacts) {
+      contacts = await timing.measure("contacts", async () => await readContacts({ chainId, walletAddress }));
+      if (sessionCache) {
+        sessionCache.contacts = contacts;
+      }
+    }
+
+    contact = await timing.measure("contact", async () => await showContactWorkflow(options, {
+      reference,
+      connections,
+      contacts
+    }));
+    timing.flush();
+  }
 
   for (;;) {
-    const contact = await showContactWorkflow(options, { reference });
+    if (!contact) {
+      await loadContact({ forceContacts: true });
+    }
+
     clearScreen();
     console.log(divider("Contact Details"));
     console.log(`Address: ${contact.peerAddress}`);
@@ -1875,6 +2190,8 @@ async function openContactDetailScreen(rl, options, reference) {
           alias,
           notes
         });
+        await loadContact({ forceContacts: true });
+        invalidateSessionCacheByGroup(sessionCache, ["contactsView"]);
         notice = "Contact saved.";
       } catch (workflowError) {
         error = workflowError?.message || String(workflowError);
@@ -1885,6 +2202,17 @@ async function openContactDetailScreen(rl, options, reference) {
     if (selection.action.value === "verify") {
       try {
         const result = await verifyContactWorkflow(options, { reference: contact.peerAddress });
+        contacts = await readContacts({ chainId, walletAddress });
+        if (sessionCache) {
+          sessionCache.contacts = contacts;
+        }
+        contact = {
+          ...contact,
+          contact: result.contact,
+          activeChatKey: result.activeChatKey,
+          fingerprint: formatChatKeyFingerprint(result.activeChatKey.pubKey)
+        };
+        invalidateSessionCacheByGroup(sessionCache, ["contactsView"]);
         notice = `Verified fingerprint ${formatChatKeyFingerprint(result.activeChatKey.pubKey)}.`;
       } catch (workflowError) {
         error = workflowError?.message || String(workflowError);
@@ -1892,16 +2220,28 @@ async function openContactDetailScreen(rl, options, reference) {
       continue;
     }
 
-    await openConversationScreen(rl, options, contact.peerAddress);
+    await openConversationScreen(rl, options, contact.peerAddress, { sessionCache });
   }
 }
 
-async function openContactsScreen(rl, options) {
+async function openContactsScreen(rl, options, { sessionCache = null } = {}) {
   let notice = "";
   let error = "";
+  let contactsData = null;
+
+  async function loadContactsData() {
+    const timing = createTimingReport("app.openContactsScreen");
+    contactsData = await timing.measure("contacts", async () => await listContactsWorkflow(options));
+    if (sessionCache) {
+      sessionCache.contacts = contactsData.contacts;
+    }
+    timing.flush();
+  }
 
   for (;;) {
-    const contactsData = await listContactsWorkflow(options);
+    if (!contactsData) {
+      await loadContactsData();
+    }
     clearScreen();
     console.log(divider("Contacts"));
     console.log(divider("Saved Contacts"));
@@ -1944,11 +2284,13 @@ async function openContactsScreen(rl, options) {
 
       const action = selection.action.value;
     if (action.type === "open-contact") {
-      await openContactDetailScreen(rl, options, action.reference);
+      await openContactDetailScreen(rl, options, action.reference, { sessionCache });
+      contactsData = null;
       continue;
     }
 
     if (action.type === "refresh") {
+      contactsData = null;
       notice = "Contacts refreshed.";
       continue;
     }
@@ -2003,6 +2345,8 @@ async function openContactsScreen(rl, options) {
           alias,
           notes
         });
+        contactsData = null;
+        invalidateSessionCacheByGroup(sessionCache, ["contactsView"]);
         notice = "Contact saved.";
       } catch (workflowError) {
         error = workflowError?.message || String(workflowError);
@@ -2067,6 +2411,8 @@ async function openContactsScreen(rl, options) {
           walletAddress: contactsData.walletAddress,
           contacts: nextContacts
         });
+        contactsData = null;
+        invalidateSessionCacheByGroup(sessionCache, ["contactsView"]);
         notice = `Imported contacts from ${filePath}.`;
       } catch (workflowError) {
         error = workflowError?.message || String(workflowError);
@@ -2075,7 +2421,7 @@ async function openContactsScreen(rl, options) {
   }
 }
 
-async function openSettingsScreen(rl, options) {
+async function openSettingsScreen(rl, options, { sessionCache = null } = {}) {
   const { account, chainId } = await createConnections(options);
   const walletAddress = getAddress(account.address);
   let notice = "";
@@ -2121,12 +2467,14 @@ async function openSettingsScreen(rl, options) {
       walletAddress,
       appState: nextState
     });
+    invalidateSessionCacheByGroup(sessionCache, ["homeView"]);
     notice = `Exact timestamps turned ${!settings.showExactTimestamps ? "on" : "off"}.`;
   }
 }
 
 export async function launchChatApp(baseOptions, { runWizard = false, rotate = false } = {}) {
   const rl = createInterface({ input, output });
+  const sessionCache = createAppSessionCache();
   let options;
   let wizardMessage = "";
   let homeError = "";
@@ -2152,10 +2500,11 @@ export async function launchChatApp(baseOptions, { runWizard = false, rotate = f
       console.log("This client keeps message contents encrypted, but wallet activity stays public on-chain.");
       const wizardResult = await runSetupWizard(options, rl, { rotate });
       wizardMessage = appendStatusMessage(wizardMessage, wizardResult.message);
+      invalidateSessionCacheByGroup(sessionCache, ["all"]);
     }
 
     for (;;) {
-      const home = await renderHome(options);
+      const home = await renderHome(options, { sessionCache });
       clearScreen();
       console.log(divider("ChatterBlocks App"));
       console.log(`Wallet: ${home.health.walletAddress}`);
@@ -2209,12 +2558,13 @@ export async function launchChatApp(baseOptions, { runWizard = false, rotate = f
 
       const choice = selection.action.value;
       if (typeof choice === "object" && choice.type === "conversation") {
-        await openConversationScreen(rl, options, choice.peerAddress);
+        await openConversationScreen(rl, options, choice.peerAddress, { sessionCache });
         wizardMessage = "";
         continue;
       }
 
       if (choice === "refresh") {
+        invalidateSessionCacheByGroup(sessionCache, ["all"]);
         wizardMessage = "Home refreshed.";
         continue;
       }
@@ -2234,7 +2584,7 @@ export async function launchChatApp(baseOptions, { runWizard = false, rotate = f
         }
 
         try {
-          await openConversationScreen(rl, options, reference);
+          await openConversationScreen(rl, options, reference, { sessionCache });
           wizardMessage = "";
         } catch (workflowError) {
           homeError = workflowError?.message || String(workflowError);
@@ -2243,7 +2593,7 @@ export async function launchChatApp(baseOptions, { runWizard = false, rotate = f
       }
 
       if (choice === "hub") {
-        const nextRoute = await openHubScreen(rl, options);
+        const nextRoute = await openHubScreen(rl, options, { sessionCache });
         wizardMessage = "";
         if (nextRoute === ROUTE_HOME) {
           continue;
@@ -2252,13 +2602,13 @@ export async function launchChatApp(baseOptions, { runWizard = false, rotate = f
       }
 
       if (choice === "contacts") {
-        await openContactsScreen(rl, options);
+        await openContactsScreen(rl, options, { sessionCache });
         wizardMessage = "";
         continue;
       }
 
       if (choice === "settings") {
-        await openSettingsScreen(rl, options);
+        await openSettingsScreen(rl, options, { sessionCache });
         wizardMessage = "";
         continue;
       }

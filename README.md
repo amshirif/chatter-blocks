@@ -103,6 +103,11 @@ Optional local-secret encryption:
 - or pass `--passphrase <text>` to `pnpm chat ...`
 - or enter a passphrase during `pnpm chat start`
 
+Optional developer timing output:
+
+- set `CHATTER_TIMING=1` to emit app/workflow timing lines to `stderr`
+- this is for local profiling only; it does not change the terminal UI output on `stdout`
+
 Start from the included template:
 
 ```bash
