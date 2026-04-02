@@ -1094,3 +1094,50 @@ test("demo-local helper enforces sessions and prints isolated env blocks", E2E_T
     await rm(demoRoot, { recursive: true, force: true });
   }
 });
+
+test("demo:fresh starts a managed chain and demo:status reports managed session state", E2E_TEST_OPTIONS, async () => {
+  const port = await getFreePort();
+  const rpcUrl = `http://127.0.0.1:${port}`;
+  const demoRoot = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-demo-fresh-"));
+
+  try {
+    const fresh = await runCommand(commandName("bash"), ["scripts/demo-local.sh", "fresh"], {
+      env: {
+        CHATTER_DEMO_ROOT: demoRoot,
+        CHATTER_RPC_URL: rpcUrl,
+        CHATTER_PRIVATE_KEY: DEPLOYER_KEY
+      },
+      timeoutMs: 180_000
+    });
+    assert.match(fresh.stdout, /Demo session:/);
+    assert.match(fresh.stdout, /Managed Anvil PID:/);
+    assert.match(fresh.stdout, new RegExp(`export CHATTER_RPC_URL=${rpcUrl}`));
+
+    const status = await runCommand(commandName("bash"), ["scripts/demo-local.sh", "status"], {
+      env: {
+        CHATTER_DEMO_ROOT: demoRoot
+      }
+    });
+    assert.match(status.stdout, /## Demo status/);
+    assert.match(status.stdout, /Managed chain: running/);
+    assert.match(status.stdout, new RegExp(`Managed chain RPC: ${rpcUrl}`));
+    assert.match(status.stdout, /Session: /);
+
+    const cleaned = await runCommand(commandName("bash"), ["scripts/demo-local.sh", "clean"], {
+      env: {
+        CHATTER_DEMO_ROOT: demoRoot
+      }
+    });
+    assert.match(cleaned.stdout, /Cleared demo session state\./);
+
+    const statusAfterClean = await runCommand(commandName("bash"), ["scripts/demo-local.sh", "status"], {
+      env: {
+        CHATTER_DEMO_ROOT: demoRoot
+      }
+    });
+    assert.match(statusAfterClean.stdout, /Session: none/);
+    assert.match(statusAfterClean.stdout, /Managed chain: none/);
+  } finally {
+    await rm(demoRoot, { recursive: true, force: true });
+  }
+});
