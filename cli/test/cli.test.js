@@ -34,7 +34,7 @@ import {
   upsertHubResponseRecord,
   writeHubState
 } from "../hub.js";
-import { decryptMessageRecord } from "../messages.js";
+import { decryptMessageRecord, mergeConversationRecords } from "../messages.js";
 import {
   createChatKeypair,
   getActiveLocalKey,
@@ -49,12 +49,15 @@ import {
   buildContactsActions,
   buildConversationActions,
   buildPromptFooterLines,
+  createAppSessionCache,
   formatLocalSecretStateLabel,
   formatCopyBlock,
+  invalidateSessionCacheByGroup,
   inspectLocalSecretState,
   resolveMenuSelection
 } from "../app.js";
 import { resolveSetupStrategy } from "../workflows.js";
+import { createTimingReport, emitTimingLine, timeAsync } from "../timing.js";
 
 const ALICE = "0x1000000000000000000000000000000000000001";
 const BOB = "0x2000000000000000000000000000000000000002";
@@ -678,10 +681,107 @@ test("app state persists drafts and unread counts", async () => {
 
     assert.equal(stored.conversations[BOB.toLowerCase()].draft, "hello draft");
     assert.equal(stored.conversations[BOB.toLowerCase()].lastSeenMessageId, "2");
+    assert.equal(stored.conversations[BOB.toLowerCase()].lastMessageDirection, null);
+    assert.equal(stored.conversations[BOB.toLowerCase()].lastMessageBody, null);
     assert.equal(unreadCount, 1);
   } finally {
     await rm(baseDir, { recursive: true, force: true });
   }
+});
+
+test("app state persists cached last-message summary fields", async () => {
+  const appState = upsertConversationState({
+    appState: null,
+    chainId: 31337,
+    walletAddress: ALICE,
+    peerWalletAddress: BOB,
+    lastSeenMessageId: 5n,
+    lastMessageDirection: "out",
+    lastMessageBody: "cached preview",
+    lastMessageCreatedAt: 12345
+  });
+
+  assert.equal(appState.conversations[BOB.toLowerCase()].lastMessageDirection, "out");
+  assert.equal(appState.conversations[BOB.toLowerCase()].lastMessageBody, "cached preview");
+  assert.equal(appState.conversations[BOB.toLowerCase()].lastMessageCreatedAt, 12345);
+});
+
+test("timing utilities stay silent by default and emit stable lines when enabled", async () => {
+  const writes = [];
+  const writer = {
+    write(value) {
+      writes.push(String(value));
+    }
+  };
+
+  emitTimingLine("app.renderHome", { matches: 11.2 }, { totalMs: 42.4, writer, enabled: false });
+  await timeAsync("app.inspectHealth", async () => "ok", { writer, enabled: false });
+  assert.equal(writes.length, 0);
+
+  const report = createTimingReport("app.renderHome", { writer, enabled: true });
+  await report.measure("matches", async () => await Promise.resolve());
+  await report.measure("summaries", async () => await Promise.resolve());
+  report.flush();
+  await timeAsync("app.inspectHealth", async () => "ok", { writer, enabled: true });
+
+  assert.match(writes[0], /^timing app\.renderHome total=\d+ms matches=\d+ms summaries=\d+ms\n$/);
+  assert.match(writes[1], /^timing app\.inspectHealth total=\d+ms\n$/);
+});
+
+test("session cache invalidation groups clear the expected keys", () => {
+  const sessionCache = {
+    ...createAppSessionCache(),
+    health: { ok: true },
+    contacts: { ok: true },
+    hubState: { ok: true },
+    matches: { ok: true },
+    homeSummaries: [{ ok: true }],
+    home: { ok: true }
+  };
+
+  invalidateSessionCacheByGroup(sessionCache, ["homeContent"]);
+  assert.equal(sessionCache.home, null);
+  assert.equal(sessionCache.homeSummaries, null);
+  assert.deepEqual(sessionCache.health, { ok: true });
+  assert.deepEqual(sessionCache.contacts, { ok: true });
+
+  invalidateSessionCacheByGroup(sessionCache, ["contactsView"]);
+  assert.equal(sessionCache.health, null);
+  assert.equal(sessionCache.contacts, null);
+  assert.equal(sessionCache.home, null);
+  assert.equal(sessionCache.homeSummaries, null);
+  assert.deepEqual(sessionCache.hubState, { ok: true });
+  assert.deepEqual(sessionCache.matches, { ok: true });
+
+  sessionCache.health = { ok: true };
+  sessionCache.contacts = { ok: true };
+  sessionCache.hubState = { ok: true };
+  sessionCache.matches = { ok: true };
+  sessionCache.homeSummaries = [{ ok: true }];
+  sessionCache.home = { ok: true };
+
+  invalidateSessionCacheByGroup(sessionCache, ["hubView", "contactsView"]);
+  assert.equal(sessionCache.health, null);
+  assert.equal(sessionCache.contacts, null);
+  assert.equal(sessionCache.hubState, null);
+  assert.equal(sessionCache.matches, null);
+  assert.equal(sessionCache.homeSummaries, null);
+  assert.equal(sessionCache.home, null);
+});
+
+test("mergeConversationRecords preserves ordering and avoids duplicates", () => {
+  const existing = [
+    { messageId: 2n, text: "two" },
+    { messageId: 4n, text: "four" }
+  ];
+  const incoming = [
+    { messageId: 3n, text: "three" },
+    { messageId: 4n, text: "four-updated" }
+  ];
+
+  const merged = mergeConversationRecords(existing, incoming);
+  assert.deepEqual(merged.map((record) => record.messageId), [2n, 3n, 4n]);
+  assert.equal(merged.at(-1).text, "four-updated");
 });
 
 test("share bundle codes roundtrip without losing invite details", () => {

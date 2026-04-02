@@ -56,6 +56,7 @@ import {
   upsertContact,
   writeContacts
 } from "./contacts.js";
+import { createTimingReport } from "./timing.js";
 
 export const INVITE_STATUS_ACTIVE = 1;
 export const MAX_LIST_SCAN_LIMIT = 100;
@@ -499,8 +500,9 @@ export async function postInviteWorkflow(options, { phraseA, phraseB, ttlHours }
   };
 }
 
-export async function listActiveInvitesWorkflow(options, { cursor, limit }) {
-  const { publicClient, contractAddress } = await createPublicConnection(options);
+export async function listActiveInvitesWorkflow(options, { cursor, limit }, { connections = null } = {}) {
+  const resolvedConnections = connections ?? await createPublicConnection(options);
+  const { publicClient, contractAddress } = resolvedConnections;
   const resolvedCursor = resolveCursor(cursor);
   const resolvedLimit = resolveLimit(limit);
 
@@ -796,86 +798,166 @@ export async function acceptInviteResponseWorkflow(options, { inviteId, response
   };
 }
 
-export async function listInviteMatchesWorkflow(options) {
-  const { publicClient, account, chainId, contractAddress } = await createConnections(options);
+function inviteRecordNeedsMatchSync(storedInvite, { peer, invite, matchRecord }) {
+  if (!storedInvite) {
+    return true;
+  }
+
+  return (
+    storedInvite.role !== peer.role ||
+    storedInvite.inviteCommitment?.toLowerCase() !== invite.inviteCommitment.toLowerCase() ||
+    storedInvite.posterWalletAddress?.toLowerCase() !== invite.poster.toLowerCase() ||
+    Number(storedInvite.posterKeyVersion) !== Number(invite.posterKeyVersion) ||
+    Number(storedInvite.expiresAt) !== Number(invite.expiresAt) ||
+    storedInvite.status !== "MATCHED" ||
+    storedInvite.peerWalletAddress?.toLowerCase() !== peer.peerWalletAddress.toLowerCase() ||
+    Number(storedInvite.peerKeyVersion) !== Number(peer.peerKeyVersion) ||
+    Number(storedInvite.matchedAt) !== Number(matchRecord.matchedAt) ||
+    String(storedInvite.acceptedResponseId ?? "") !== String(matchRecord.acceptedResponseId ?? "")
+  );
+}
+
+function contactNeedsMatchSync(existingContact, { fingerprint, matchedAt }) {
+  if (!existingContact) {
+    return true;
+  }
+
+  return (
+    existingContact.fingerprint !== fingerprint ||
+    Number(existingContact.lastMatchedAt) !== Number(matchedAt)
+  );
+}
+
+export async function listInviteMatchesWorkflow(options, context = {}) {
+  const timing = createTimingReport("wf.listInviteMatches");
+  const {
+    connections = null,
+    hubState: initialHubState = undefined,
+    contacts: initialContacts = undefined
+  } = context;
+  const { publicClient, account, chainId, contractAddress } = connections ?? await createConnections(options);
   const walletAddress = getAddress(account.address);
-  const matchEvents = await getInviteMatchesByAccount(publicClient, contractAddress, walletAddress);
-  let hubState = await readHubState({ chainId, walletAddress });
-  let contacts = await readContacts({ chainId, walletAddress });
-  const matches = [];
+  const matchEvents = await timing.measure(
+    "events",
+    async () => await getInviteMatchesByAccount(publicClient, contractAddress, walletAddress)
+  );
+  let hubState = initialHubState ?? await readHubState({ chainId, walletAddress });
+  let contacts = initialContacts ?? await readContacts({ chainId, walletAddress });
+  let hubStateChanged = false;
+  let contactsChanged = false;
+  const chatKeyHistoryCache = new Map();
 
-  for (const inviteMatch of matchEvents) {
-    const peer = extractMatchPeer({ viewerAddress: walletAddress, inviteMatch });
-    const matchRecord = await getMatchRecord(publicClient, contractAddress, inviteMatch.inviteId);
-    const invite = await getInvite(publicClient, contractAddress, inviteMatch.inviteId);
-    const storedInvite = getStoredInvite(hubState, inviteMatch.inviteId);
+  const loadPeerKeyFingerprint = async (peerWalletAddress, peerKeyVersion) => {
+    const cacheKey = `${peerWalletAddress.toLowerCase()}:${peerKeyVersion.toString()}`;
+    if (!chatKeyHistoryCache.has(cacheKey)) {
+      chatKeyHistoryCache.set(
+        cacheKey,
+        getChatKeyHistory(publicClient, contractAddress, peerWalletAddress, peerKeyVersion)
+          .then((pubKey) => formatChatKeyFingerprint(pubKey))
+      );
+    }
 
-    hubState = upsertHubInviteRecord({
-      hubState,
-      chainId,
-      walletAddress,
-      inviteId: inviteMatch.inviteId,
-      role: peer.role,
-      inviteSecret: storedInvite?.inviteSecret,
-      phraseA: storedInvite?.phraseA,
-      phraseB: storedInvite?.phraseB,
-      inviteCommitment: storedInvite?.inviteCommitment ?? invite.inviteCommitment,
-      posterWalletAddress: invite.poster,
-      posterKeyVersion: invite.posterKeyVersion,
-      expiresAt: invite.expiresAt,
-      status: "MATCHED",
-      peerWalletAddress: peer.peerWalletAddress,
-      peerKeyVersion: peer.peerKeyVersion,
-      matchedAt: matchRecord.matchedAt,
-      acceptedResponseId: matchRecord.acceptedResponseId
-    });
+    return await chatKeyHistoryCache.get(cacheKey);
+  };
 
-    if (storedInvite?.responses?.[String(matchRecord.acceptedResponseId)]) {
+  const matchEntries = await timing.measure(
+    "batchReads",
+    async () => await Promise.all(
+      matchEvents.map(async (inviteMatch) => {
+        const peer = extractMatchPeer({ viewerAddress: walletAddress, inviteMatch });
+        const [matchRecord, invite, fingerprint] = await Promise.all([
+          getMatchRecord(publicClient, contractAddress, inviteMatch.inviteId),
+          getInvite(publicClient, contractAddress, inviteMatch.inviteId),
+          loadPeerKeyFingerprint(peer.peerWalletAddress, peer.peerKeyVersion)
+        ]);
+
+        return {
+          inviteId: inviteMatch.inviteId,
+          peer,
+          matchRecord,
+          invite,
+          fingerprint
+        };
+      })
+    )
+  );
+
+  for (const entry of matchEntries) {
+    const storedInvite = getStoredInvite(hubState, entry.inviteId);
+
+    if (inviteRecordNeedsMatchSync(storedInvite, entry)) {
+      hubState = upsertHubInviteRecord({
+        hubState,
+        chainId,
+        walletAddress,
+        inviteId: entry.inviteId,
+        role: entry.peer.role,
+        inviteSecret: storedInvite?.inviteSecret,
+        phraseA: storedInvite?.phraseA,
+        phraseB: storedInvite?.phraseB,
+        inviteCommitment: storedInvite?.inviteCommitment ?? entry.invite.inviteCommitment,
+        posterWalletAddress: entry.invite.poster,
+        posterKeyVersion: entry.invite.posterKeyVersion,
+        expiresAt: entry.invite.expiresAt,
+        status: "MATCHED",
+        peerWalletAddress: entry.peer.peerWalletAddress,
+        peerKeyVersion: entry.peer.peerKeyVersion,
+        matchedAt: entry.matchRecord.matchedAt,
+        acceptedResponseId: entry.matchRecord.acceptedResponseId
+      });
+      hubStateChanged = true;
+    }
+
+    const storedAcceptedResponse = storedInvite?.responses?.[String(entry.matchRecord.acceptedResponseId)];
+    if (storedAcceptedResponse && storedAcceptedResponse.status !== "ACCEPTED") {
       hubState = upsertHubResponseRecord({
         hubState,
         chainId,
         walletAddress,
-        inviteId: inviteMatch.inviteId,
-        responseId: matchRecord.acceptedResponseId,
+        inviteId: entry.inviteId,
+        responseId: entry.matchRecord.acceptedResponseId,
         status: "ACCEPTED"
       });
+      hubStateChanged = true;
     }
 
-    contacts = upsertContact({
-      contacts,
-      chainId,
-      walletAddress,
-      address: peer.peerWalletAddress,
-      fingerprint: formatChatKeyFingerprint(
-        await getChatKeyHistory(publicClient, contractAddress, peer.peerWalletAddress, peer.peerKeyVersion)
-      ),
-      lastMatchedAt: Number(matchRecord.matchedAt)
-    });
-
-    matches.push({
-      inviteId: inviteMatch.inviteId,
-      peer,
-      matchRecord,
-      invite
-    });
+    const existingContact = getContact(contacts, entry.peer.peerWalletAddress);
+    if (contactNeedsMatchSync(existingContact, {
+      fingerprint: entry.fingerprint,
+      matchedAt: Number(entry.matchRecord.matchedAt)
+    })) {
+      contacts = upsertContact({
+        contacts,
+        chainId,
+        walletAddress,
+        address: entry.peer.peerWalletAddress,
+        fingerprint: entry.fingerprint,
+        lastMatchedAt: Number(entry.matchRecord.matchedAt)
+      });
+      contactsChanged = true;
+    }
   }
 
-  await writeHubState({
-    chainId,
-    walletAddress,
-    hubState
-  });
-  const contactsPath = matches.length > 0
+  if (hubStateChanged) {
+    await writeHubState({
+      chainId,
+      walletAddress,
+      hubState
+    });
+  }
+  const contactsPath = contactsChanged
     ? await writeContacts({ chainId, walletAddress, contacts })
     : null;
 
-  return {
+  const result = {
     walletAddress,
-    matches,
+    matches: matchEntries.map(({ fingerprint, ...entry }) => entry),
     hubState,
     contacts,
     contactsPath
   };
+  timing.flush();
+  return result;
 }
 
 export async function cancelInviteWorkflow(options, { inviteId }) {
@@ -904,15 +986,16 @@ export async function cancelInviteWorkflow(options, { inviteId }) {
   return { cancelledInvite };
 }
 
-export async function readInboxWorkflow(options, { peerReference = null, cursor, limit }) {
-  const { publicClient, account, chainId, contractAddress } = await createConnections(options);
+export async function readInboxWorkflow(options, { peerReference = null, cursor, limit, connections = null, keyring = null, contacts = null }) {
+  const timing = createTimingReport("wf.readInbox");
+  const { publicClient, account, chainId, contractAddress } = connections ?? await createConnections(options);
   const viewerAddress = getAddress(account.address);
-  const keyring = await loadKeyringOrThrow({ chainId, walletAddress: viewerAddress });
-  const contacts = await readContacts({ chainId, walletAddress: viewerAddress });
+  const resolvedKeyring = keyring ?? await loadKeyringOrThrow({ chainId, walletAddress: viewerAddress });
+  const resolvedContacts = contacts ?? await readContacts({ chainId, walletAddress: viewerAddress });
   const resolvedLimit = resolveLimit(limit);
   const resolvedCursor = resolveCursor(cursor);
   const peerAddress = peerReference
-    ? resolveContactAddress({ contacts, reference: peerReference, label: "conversation address or alias" })
+    ? resolveContactAddress({ contacts: resolvedContacts, reference: peerReference, label: "conversation address or alias" })
     : null;
 
   let messageIds;
@@ -930,19 +1013,22 @@ export async function readInboxWorkflow(options, { peerReference = null, cursor,
       publicClient,
       contractAddress,
       viewerAddress,
-      keyring,
-      messageIds
+      keyring: resolvedKeyring,
+      messageIds,
+      timingReport: timing
     });
 
-  return {
+  const result = {
     viewerAddress,
     peerAddress,
     conversationId,
     records,
     limit: resolvedLimit,
     nextCursor: messageIds.length === resolvedLimit ? messageIds[messageIds.length - 1] : null,
-    contacts
+    contacts: resolvedContacts
   };
+  timing.flush();
+  return result;
 }
 
 export async function listContactsWorkflow(options) {
@@ -989,12 +1075,12 @@ export async function saveContactWorkflow(options, { address, alias, notes, chai
   };
 }
 
-export async function showContactWorkflow(options, { reference }) {
-  const { publicClient, account, chainId, contractAddress } = await createConnections(options);
+export async function showContactWorkflow(options, { reference, connections = null, contacts = null }) {
+  const { publicClient, account, chainId, contractAddress } = connections ?? await createConnections(options);
   const walletAddress = getAddress(account.address);
-  const contacts = await readContacts({ chainId, walletAddress });
-  const peerAddress = resolveContactAddress({ contacts, reference, label: "contact address or alias" });
-  const contact = getContact(contacts, peerAddress);
+  const resolvedContacts = contacts ?? await readContacts({ chainId, walletAddress });
+  const peerAddress = resolveContactAddress({ contacts: resolvedContacts, reference, label: "contact address or alias" });
+  const contact = getContact(resolvedContacts, peerAddress);
   const activeChatKey = await getActiveChatKey(publicClient, contractAddress, peerAddress);
 
   return {

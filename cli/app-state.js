@@ -13,6 +13,15 @@ function normalizeConversationRecord(address, record) {
     lastSeenMessageId: record.lastSeenMessageId ? String(record.lastSeenMessageId) : null,
     draft: record.draft ?? "",
     lastOpenedAt: record.lastOpenedAt ?? null,
+    lastMessageDirection:
+      record.lastMessageDirection === "in" || record.lastMessageDirection === "out"
+        ? record.lastMessageDirection
+        : null,
+    lastMessageBody: record.lastMessageBody ?? null,
+    lastMessageCreatedAt:
+      record.lastMessageCreatedAt !== undefined && record.lastMessageCreatedAt !== null
+        ? Number(record.lastMessageCreatedAt)
+        : null,
     updatedAt: new Date().toISOString()
   };
 }
@@ -80,7 +89,10 @@ export function upsertConversationState({
   peerWalletAddress,
   lastSeenMessageId,
   draft,
-  lastOpenedAt
+  lastOpenedAt,
+  lastMessageDirection,
+  lastMessageBody,
+  lastMessageCreatedAt
 }) {
   const nextState = normalizeAppState(appState, chainId, walletAddress);
   const normalizedPeer = getAddress(peerWalletAddress).toLowerCase();
@@ -93,7 +105,19 @@ export function upsertConversationState({
         ? (lastSeenMessageId === null ? null : String(lastSeenMessageId))
         : existing?.lastSeenMessageId ?? null,
     draft: draft !== undefined ? draft : existing?.draft ?? "",
-    lastOpenedAt: lastOpenedAt !== undefined ? lastOpenedAt : existing?.lastOpenedAt ?? null
+    lastOpenedAt: lastOpenedAt !== undefined ? lastOpenedAt : existing?.lastOpenedAt ?? null,
+    lastMessageDirection:
+      lastMessageDirection !== undefined
+        ? (lastMessageDirection ?? null)
+        : existing?.lastMessageDirection ?? null,
+    lastMessageBody:
+      lastMessageBody !== undefined
+        ? (lastMessageBody ?? null)
+        : existing?.lastMessageBody ?? null,
+    lastMessageCreatedAt:
+      lastMessageCreatedAt !== undefined
+        ? (lastMessageCreatedAt ?? null)
+        : existing?.lastMessageCreatedAt ?? null
   });
 
   return nextState;

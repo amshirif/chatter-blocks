@@ -18,6 +18,16 @@ function sortByMessageIdAscending(records) {
   });
 }
 
+export function mergeConversationRecords(existingRecords, newRecords) {
+  const merged = new Map();
+
+  for (const record of [...existingRecords, ...newRecords]) {
+    merged.set(record.messageId.toString(), record);
+  }
+
+  return sortByMessageIdAscending([...merged.values()]);
+}
+
 export async function decryptMessageRecord({
   header,
   ciphertextHex,
@@ -87,7 +97,8 @@ export async function hydrateMessages({
   contractAddress,
   viewerAddress,
   keyring,
-  messageIds
+  messageIds,
+  timingReport = null
 }) {
   const keyCache = new Map();
 
@@ -100,31 +111,79 @@ export async function hydrateMessages({
     return keyCache.get(cacheKey);
   };
 
-  const records = await Promise.all(
-    messageIds.map(async (messageId) => {
-      const header = await getMessageHeader(publicClient, contractAddress, messageId);
-      const ciphertextHex = await getMessageCiphertext(
-        publicClient,
-        contractAddress,
-        messageId,
-        header.blockNumber
-      );
-      const decrypted = await decryptMessageRecord({
-        header,
-        ciphertextHex,
-        viewerAddress,
-        keyring,
-        resolveChatKey
-      });
+  const messageParts = await (timingReport
+    ? timingReport.measure("headersAndCiphertexts", async () => await Promise.all(
+      messageIds.map(async (messageId) => {
+        const header = await getMessageHeader(publicClient, contractAddress, messageId);
+        const ciphertextHex = await getMessageCiphertext(
+          publicClient,
+          contractAddress,
+          messageId,
+          header.blockNumber
+        );
 
-      return {
-        messageId: BigInt(messageId),
-        header,
-        ciphertextHex,
-        ...decrypted
-      };
-    })
-  );
+        return {
+          messageId: BigInt(messageId),
+          header,
+          ciphertextHex
+        };
+      })
+    ))
+    : Promise.all(
+      messageIds.map(async (messageId) => {
+        const header = await getMessageHeader(publicClient, contractAddress, messageId);
+        const ciphertextHex = await getMessageCiphertext(
+          publicClient,
+          contractAddress,
+          messageId,
+          header.blockNumber
+        );
+
+        return {
+          messageId: BigInt(messageId),
+          header,
+          ciphertextHex
+        };
+      })
+    ));
+
+  const records = await (timingReport
+    ? timingReport.measure("hydrate", async () => await Promise.all(
+      messageParts.map(async ({ messageId, header, ciphertextHex }) => {
+        const decrypted = await decryptMessageRecord({
+          header,
+          ciphertextHex,
+          viewerAddress,
+          keyring,
+          resolveChatKey
+        });
+
+        return {
+          messageId,
+          header,
+          ciphertextHex,
+          ...decrypted
+        };
+      })
+    ))
+    : Promise.all(
+      messageParts.map(async ({ messageId, header, ciphertextHex }) => {
+        const decrypted = await decryptMessageRecord({
+          header,
+          ciphertextHex,
+          viewerAddress,
+          keyring,
+          resolveChatKey
+        });
+
+        return {
+          messageId,
+          header,
+          ciphertextHex,
+          ...decrypted
+        };
+      })
+    ));
 
   return sortByMessageIdAscending(records);
 }
