@@ -5,6 +5,13 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import nacl from "tweetnacl";
 import { bytesToHex, getAddress } from "viem";
 
+import {
+  decryptJsonObject,
+  defaultPassphrase,
+  encryptJsonObject,
+  isEncryptedSecretEnvelope
+} from "./secret-store.js";
+
 function defaultBaseDir() {
   return process.env.CHATTER_HOME || path.join(os.homedir(), ".chatter-blocks");
 }
@@ -25,11 +32,22 @@ export function getKeyringPath({ chainId, walletAddress, baseDir = defaultBaseDi
   return path.join(getWalletStateDir({ chainId, walletAddress, baseDir }), "keyring.json");
 }
 
-export async function readKeyring({ chainId, walletAddress, baseDir = defaultBaseDir() }) {
+export async function readKeyring({ chainId, walletAddress, baseDir = defaultBaseDir(), passphrase = defaultPassphrase() }) {
   try {
     const filePath = getKeyringPath({ chainId, walletAddress, baseDir });
     const contents = await readFile(filePath, "utf8");
-    return JSON.parse(contents);
+    const parsed = JSON.parse(contents);
+    if (!isEncryptedSecretEnvelope(parsed)) {
+      return parsed;
+    }
+
+    if (!passphrase) {
+      throw new Error(
+        "Keyring is encrypted. Set CHATTER_PASSPHRASE or pass --passphrase to unlock local chat keys."
+      );
+    }
+
+    return decryptJsonObject(parsed, passphrase);
   } catch (error) {
     if (error?.code === "ENOENT") {
       return null;
@@ -39,10 +57,17 @@ export async function readKeyring({ chainId, walletAddress, baseDir = defaultBas
   }
 }
 
-export async function writeKeyring({ chainId, walletAddress, keyring, baseDir = defaultBaseDir() }) {
+export async function writeKeyring({
+  chainId,
+  walletAddress,
+  keyring,
+  baseDir = defaultBaseDir(),
+  passphrase = defaultPassphrase()
+}) {
   const filePath = getKeyringPath({ chainId, walletAddress, baseDir });
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await writeFile(filePath, `${JSON.stringify(keyring, null, 2)}\n`, {
+  const payload = passphrase ? encryptJsonObject(keyring, passphrase) : keyring;
+  await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, {
     mode: 0o600
   });
   await chmod(filePath, 0o600);

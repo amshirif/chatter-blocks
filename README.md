@@ -44,13 +44,18 @@ What the chain still reveals:
 - responder wallet address when a response transaction is submitted
 - accepted matches
 
-Local secrets are also not encrypted at rest in v1:
+Local secrets can now be encrypted at rest if you set `CHATTER_PASSPHRASE` or pass `--passphrase`:
 
 - chat private keys live in `~/.chatter-blocks/<chainId>/<wallet>/keyring.json`
 - rendezvous invite drafts and secrets live in `~/.chatter-blocks/<chainId>/<wallet>/hub.json`
 - aliases, fingerprints, and notes live in `~/.chatter-blocks/<chainId>/<wallet>/contacts.json`
 - drafts, unread markers, and terminal-app settings live in `~/.chatter-blocks/<chainId>/<wallet>/app-state.json`
 - all files are written with `0600` permissions
+
+By default:
+
+- `keyring.json` and `hub.json` are plaintext unless a passphrase is configured
+- `contacts.json` and `app-state.json` remain plaintext convenience metadata
 
 ## Requirements
 
@@ -62,6 +67,46 @@ Local secrets are also not encrypted at rest in v1:
 
 ```bash
 pnpm install
+```
+
+## Test
+
+Fast local verification:
+
+```bash
+pnpm test
+```
+
+Targeted product-flow rerun against local Anvil:
+
+```bash
+pnpm test:e2e
+```
+
+`pnpm test` now includes the full local product-flow gate. `pnpm test:e2e` is the targeted rerun for that path.
+
+The E2E suite starts a local chain, deploys the contract, drives the CLI through setup, rendezvous post/respond/accept, sends a real encrypted message, and drives `pnpm chat start` through the app flow with hub navigation, back, and quit checks.
+
+## Config
+
+The CLI and terminal app automatically load a local `.env` file from the repo root if it exists.
+
+Precedence is:
+
+- command flags
+- existing shell environment and values loaded from `.env`
+- interactive prompts in `pnpm chat start`
+
+Optional local-secret encryption:
+
+- set `CHATTER_PASSPHRASE` in your shell or `.env`
+- or pass `--passphrase <text>` to `pnpm chat ...`
+- or enter a passphrase during `pnpm chat start`
+
+Start from the included template:
+
+```bash
+cp .env.example .env
 ```
 
 ## Run locally with Anvil
@@ -92,16 +137,29 @@ export CHATTER_CONTRACT_ADDRESS=0xYOUR_DEPLOYED_CONTRACT
 
 `CHATTER_CONTRACT_ADDRESS` is the only contract discovery mechanism in v1. The hub is just this contract at a known address on the selected chain.
 
+For a repeatable local demo, the repo now includes helper scripts:
+
+```bash
+pnpm demo:chain
+pnpm demo:deploy
+pnpm demo:alice
+pnpm demo:bob
+pnpm demo:env
+pnpm demo:clean
+```
+
+`pnpm demo:deploy` creates a fresh demo session, deploys the contract, and prints the exact export blocks for Alice and Bob after deployment, including the deployed contract address. `pnpm demo:env` reprints the current session, and `pnpm demo:clean` clears it.
+
 ## Quick demo
 
 This is the fastest way to see the product working from a fresh clone with two local users.
 
-Use three terminals.
+Use four terminals if you want to keep deploy output visible, or three if you reuse Alice's shell.
 
 Terminal 1 starts Anvil:
 
 ```bash
-anvil
+pnpm demo:chain
 ```
 
 Terminal 2 is Alice. This example uses the first default Anvil account:
@@ -109,22 +167,10 @@ Terminal 2 is Alice. This example uses the first default Anvil account:
 - wallet: `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`
 - private key: `0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80`
 
-Deploy first, then launch Alice:
+Deploy first:
 
 ```bash
-export RPC_URL=http://127.0.0.1:8545
-export PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-
-forge script script/DeployChatterBlocks.s.sol:DeployChatterBlocksScript \
-  --rpc-url "$RPC_URL" \
-  --broadcast
-
-export CHATTER_HOME=/tmp/chatter-blocks-alice
-export CHATTER_RPC_URL=http://127.0.0.1:8545
-export CHATTER_CONTRACT_ADDRESS=0xYOUR_DEPLOYED_CONTRACT
-export CHATTER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-
-pnpm chat start
+pnpm demo:deploy
 ```
 
 Terminal 3 is Bob. This example uses the second default Anvil account:
@@ -133,21 +179,23 @@ Terminal 3 is Bob. This example uses the second default Anvil account:
 - private key: `0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d`
 
 ```bash
-export CHATTER_HOME=/tmp/chatter-blocks-bob
-export CHATTER_RPC_URL=http://127.0.0.1:8545
-export CHATTER_CONTRACT_ADDRESS=0xYOUR_DEPLOYED_CONTRACT
-export CHATTER_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+pnpm demo:alice
+```
 
-pnpm chat start
+Terminal 4 is Bob:
+
+```bash
+pnpm demo:bob
 ```
 
 Once both apps are open:
 
-1. Alice picks `hub`, then `post`, enters two phrases, and copies the printed `shareCode`.
-2. Bob picks `hub`, then `respond`, and pastes the `shareCode`.
-3. Alice picks `hub`, then `review`, enters the invite ID, and accepts Bob's response.
-4. Either side returns to the home screen, opens the conversation, uses `type`, then `send`.
-5. The other side opens the same thread and sees the decrypted message.
+1. Alice selects `1. Hub`, then `1. Post invite`, enters two phrases, and copies the full `shareCode` block.
+2. Bob selects `1. Hub`, then `2. Respond with share code`, and pastes the `shareCode`.
+3. Alice selects `1. Hub`, then `3. Review responses`, selects the invite, and accepts the numbered valid response.
+4. Alice can choose `1. Open conversation` immediately after accept, or either side can open the match from home.
+5. One side selects `1. Edit draft`, writes a message, then selects `2. Send message`.
+6. The other side opens the same thread and sees the decrypted message.
 
 If you want a pure command-line demo instead of the app, the low-level flow later in this README does the same thing with raw commands.
 
@@ -159,7 +207,15 @@ If you want the friendliest entrypoint, use the setup wizard:
 pnpm chat start
 ```
 
-`chat start` asks for missing configuration, checks local/on-chain chat key health, offers to register or rotate a key if needed, and then opens the terminal app.
+`chat start` asks for missing configuration, optionally asks for a local-state passphrase, checks local/on-chain chat key health, offers to register or rotate a key if needed, and then opens the terminal app.
+
+If local secret files are encrypted and no passphrase is already configured, `chat start` now opens an explicit unlock screen before it performs health checks. You can retry unlock, back out to the blocking startup screen, or quit cleanly without crashing the app.
+
+If you want to force a fresh local chat key rotation during startup:
+
+```bash
+pnpm chat start --rotate
+```
 
 If your environment variables are already configured, you can open the app directly:
 
@@ -175,11 +231,11 @@ The terminal app is the primary UX. It gives you:
 - thread views with inline draft/send/save/verify actions
 - a hub screen for posting invites, responding from share bundles, reviewing responses, and accepting matches
 - a contacts screen for aliases, fingerprints, verification, export, and import
-- a settings screen for polling and timestamp display
+- a settings screen for timestamp display
 
 The app stays local. It calls the same low-level workflows as the raw CLI commands.
 
-The current app is menu-driven. It is not a split-pane curses UI yet. You move between screens with typed actions like `hub`, `contacts`, `settings`, `type`, and `send`.
+The current app is menu-driven. It is not a split-pane curses UI yet. You move between screens with numbered actions and fixed `b` for back / `q` for quit.
 
 ## Using the terminal app
 
@@ -188,29 +244,29 @@ The app has five main screens.
 Home screen:
 
 - shows wallet, chain, RPC, contract, status, conversations, invite count, match count, and saved-contact count
-- actions: `1-8` to open a conversation, `new`, `hub`, `contacts`, `settings`, `setup`, `search`, `refresh`, `quit`
+- actions: `1. Hub`, `2. Contacts`, `3. Settings`, `4. New conversation`, `5. Run setup`, `6. Refresh`, then conversation shortcuts starting at `7`
 
 Conversation screen:
 
 - shows the peer alias or short address, the local fingerprint record, verification state, recent decrypted messages, and the current draft
-- actions: `type`, `send`, `save`, `verify`, `refresh`, `back`
+- actions: `1. Edit draft`, `2. Send message`, `3. Save contact`, `4. Verify contact`, `5. Refresh`, plus `b` and `q`
 
 Hub screen:
 
 - shows public active invites, your local invite records, and match count
-- actions: `post`, `respond`, `review`, `cancel`, `matches`, `back`
+- actions: `1. Post invite`, `2. Respond with share code`, `3. Review responses`, `4. View matches`, `5. Cancel invite`, `6. Show latest share bundle`, `7. Refresh`, plus `b` and `q`
 
 Contacts screen:
 
 - shows aliases, verification flags, and fingerprints
-- actions: `show`, `save`, `verify`, `export`, `import`, `back`
+- actions: `1. Add contact`, `2. Export contacts`, `3. Import contacts`, `4. Refresh`, then saved-contact shortcuts starting at `5`, plus `b` and `q`
 
 Settings screen:
 
-- shows poll interval and timestamp mode
-- actions: `poll`, `timestamps`, `back`
+- shows exact timestamp mode
+- actions: `1. Toggle timestamps`, plus `b` and `q`
 
-The first-run `chat start` wizard explains the privacy boundary, checks your RPC and contract configuration, checks whether your local chat key matches the on-chain key, and offers to register or rotate the key before opening the app.
+The first-run `chat start` wizard explains the privacy boundary, checks your RPC and contract configuration, optionally lets you set a passphrase for local secret files, checks whether your local chat key matches the on-chain key, and offers to register or rotate the key before opening the app.
 
 ## Low-level CLI flow
 
@@ -370,7 +426,11 @@ Files:
 - `contacts.json`: aliases, notes, chain labels, verification state, fingerprints, and last-match timestamps
 - `app-state.json`: draft text, unread markers, last-opened timestamps, and terminal-app settings
 
-All of these files are local only. None of them are uploaded by the app. In v1 they are not encrypted at rest, so treat the machine as part of the trust boundary.
+All of these files are local only. None of them are uploaded by the app.
+
+- `keyring.json` and `hub.json` are encrypted at rest if you configure `CHATTER_PASSPHRASE` or pass `--passphrase`
+- `contacts.json` and `app-state.json` remain plaintext convenience metadata
+- without a passphrase, all files remain part of the local trust boundary
 
 ## Troubleshooting
 
@@ -382,6 +442,8 @@ All of these files are local only. None of them are uploaded by the app. In v1 t
   set `CHATTER_CONTRACT_ADDRESS` to the deployed `ChatterBlocks` contract on the same chain as your RPC.
 - `Missing private key`:
   set `CHATTER_PRIVATE_KEY` or pass `--private-key`.
+- `Keyring is encrypted` or `Hub state is encrypted`:
+  set `CHATTER_PASSPHRASE`, pass `--passphrase`, or rerun `pnpm chat start` and enter the passphrase.
 - `No active chat key` or you cannot decrypt expected messages:
   run `pnpm chat setup`; if you intentionally want a new chat key, run `pnpm chat setup --rotate`.
 - `Unknown contact address or alias`:
@@ -404,6 +466,7 @@ The CLI resolves configuration in this order:
 - `--rpc-url` over `CHATTER_RPC_URL`
 - `--contract-address` over `CHATTER_CONTRACT_ADDRESS`
 - `--private-key` over `CHATTER_PRIVATE_KEY`
+- `--passphrase` over `CHATTER_PASSPHRASE`
 
 Commands:
 

@@ -6,6 +6,12 @@ import { bytesToHex, encodePacked, getAddress, keccak256 } from "viem";
 
 import { decryptPackedJsonHex, encryptPackedJsonHex } from "./crypto.js";
 import { getWalletStateDir, getLocalKey } from "./keyring.js";
+import {
+  decryptJsonObject,
+  defaultPassphrase,
+  encryptJsonObject,
+  isEncryptedSecretEnvelope
+} from "./secret-store.js";
 
 export const DEFAULT_INVITE_TTL_HOURS = 24;
 export const MIN_INVITE_TTL_HOURS = 1;
@@ -155,11 +161,27 @@ function normalizeHubState(hubState, chainId, walletAddress) {
   return nextState;
 }
 
-export async function readHubState({ chainId, walletAddress, baseDir }) {
+export async function readHubState({
+  chainId,
+  walletAddress,
+  baseDir,
+  passphrase = defaultPassphrase()
+}) {
   try {
     const filePath = getHubPath({ chainId, walletAddress, baseDir });
     const contents = await readFile(filePath, "utf8");
-    return normalizeHubState(JSON.parse(contents), chainId, walletAddress);
+    const parsed = JSON.parse(contents);
+    if (!isEncryptedSecretEnvelope(parsed)) {
+      return normalizeHubState(parsed, chainId, walletAddress);
+    }
+
+    if (!passphrase) {
+      throw new Error(
+        "Hub state is encrypted. Set CHATTER_PASSPHRASE or pass --passphrase to unlock invite secrets."
+      );
+    }
+
+    return normalizeHubState(decryptJsonObject(parsed, passphrase), chainId, walletAddress);
   } catch (error) {
     if (error?.code === "ENOENT") {
       return null;
@@ -169,12 +191,19 @@ export async function readHubState({ chainId, walletAddress, baseDir }) {
   }
 }
 
-export async function writeHubState({ chainId, walletAddress, hubState, baseDir }) {
+export async function writeHubState({
+  chainId,
+  walletAddress,
+  hubState,
+  baseDir,
+  passphrase = defaultPassphrase()
+}) {
   const filePath = getHubPath({ chainId, walletAddress, baseDir });
   const nextHubState = normalizeHubState(hubState, chainId, walletAddress);
+  const payload = passphrase ? encryptJsonObject(nextHubState, passphrase) : nextHubState;
 
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await writeFile(filePath, `${JSON.stringify(nextHubState, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
   await chmod(filePath, 0o600);
   return filePath;
 }

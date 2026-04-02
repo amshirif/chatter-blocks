@@ -4,6 +4,7 @@ import { writeFile } from "node:fs/promises";
 
 import { Command } from "commander";
 
+import { loadDotEnvForCurrentProcess } from "./env.js";
 import { createConnections } from "./config.js";
 import {
   formatContactLabel,
@@ -39,6 +40,8 @@ import {
 } from "./hub.js";
 import { formatMessageRecord } from "./messages.js";
 
+loadDotEnvForCurrentProcess();
+
 function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -52,7 +55,14 @@ function addSharedOptions(command) {
       "--contract-address <address>",
       "deployed ChatterBlocks contract address (overrides CHATTER_CONTRACT_ADDRESS)"
     )
-    .option("--private-key <hex>", "wallet private key (overrides CHATTER_PRIVATE_KEY)");
+    .option("--private-key <hex>", "wallet private key (overrides CHATTER_PRIVATE_KEY)")
+    .option("--passphrase <text>", "optional local-state encryption passphrase (overrides CHATTER_PASSPHRASE)");
+}
+
+function applyRuntimeOptions(options) {
+  if (options.passphrase) {
+    process.env.CHATTER_PASSPHRASE = options.passphrase;
+  }
 }
 
 function printRecords(records) {
@@ -80,6 +90,14 @@ function formatFriendlyError(error) {
     return `${message} Run \`pnpm chat start\` or \`pnpm chat setup\`.`;
   }
 
+  if (message.includes("Keyring is encrypted")) {
+    return `${message} Set CHATTER_PASSPHRASE, pass --passphrase, or rerun \`pnpm chat start\` and enter the passphrase.`;
+  }
+
+  if (message.includes("Hub state is encrypted")) {
+    return `${message} Set CHATTER_PASSPHRASE, pass --passphrase, or rerun \`pnpm chat start\` and enter the passphrase.`;
+  }
+
   if (message.includes("Unknown recipient address or alias") || message.includes("Unknown conversation address or alias")) {
     return `${message} Check \`pnpm chat contacts list\` or save the contact first.`;
   }
@@ -99,8 +117,10 @@ addSharedOptions(
   program
     .command("start")
     .description("Run the setup wizard and open the terminal chat app.")
+    .option("--rotate", "rotate the chat key during the setup wizard")
 ).action(async (options) => {
-  await launchChatApp(options, { runWizard: true });
+  applyRuntimeOptions(options);
+  await launchChatApp(options, { runWizard: true, rotate: Boolean(options.rotate) });
 });
 
 addSharedOptions(
@@ -108,6 +128,7 @@ addSharedOptions(
     .command("app")
     .description("Open the interactive terminal chat app.")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   await launchChatApp(options);
 });
 
@@ -117,6 +138,7 @@ addSharedOptions(
     .description("Generate a local chat keypair and register the public key on-chain.")
     .option("--rotate", "rotate an existing chat key")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const result = await setupChatWorkflow(options, { rotate: Boolean(options.rotate) });
 
   if (result.alreadyConfigured) {
@@ -139,6 +161,7 @@ addSharedOptions(
     .requiredOption("--to <addressOrAlias>", "recipient wallet address or saved alias")
     .requiredOption("--message <text>", "message text")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   console.log("Encrypting and sending message...");
   const result = await sendMessageWorkflow(options, {
     recipientReference: options.to,
@@ -157,6 +180,7 @@ addSharedOptions(
     .command("list")
     .description("List saved contacts and aliases.")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const result = await listContactsWorkflow(options);
   if (result.list.length === 0) {
     console.log("No contacts saved.");
@@ -180,6 +204,7 @@ addSharedOptions(
     .option("--notes <text>", "contact notes")
     .option("--chain-label <label>", "optional chain label")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const result = await saveContactWorkflow(options, {
     address: options.address,
     alias: options.alias,
@@ -197,6 +222,7 @@ addSharedOptions(
     .description("Show contact details, verification state, and fingerprint.")
     .requiredOption("--with <addressOrAlias>", "contact wallet address or alias")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const result = await showContactWorkflow(options, { reference: options.with });
   console.log(`Address: ${result.peerAddress}`);
   console.log(`Alias: ${result.contact?.alias ?? "(none)"}`);
@@ -212,6 +238,7 @@ addSharedOptions(
     .description("Mark a contact as verified against its current on-chain chat key.")
     .requiredOption("--with <addressOrAlias>", "contact wallet address or alias")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const result = await verifyContactWorkflow(options, { reference: options.with });
   console.log(`Verified ${result.contact.alias ?? result.contact.address}.`);
   console.log(`Fingerprint: ${result.contact.fingerprint}`);
@@ -224,6 +251,7 @@ addSharedOptions(
     .description("Export the local contact book to a JSON file.")
     .requiredOption("--file <path>", "destination JSON file")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const { account, chainId } = await createConnections(options);
   const walletAddress = account.address;
   const contacts = await readContacts({ chainId, walletAddress });
@@ -245,6 +273,7 @@ addSharedOptions(
     .description("Import contacts from a JSON file and merge them into the local book.")
     .requiredOption("--file <path>", "source JSON file")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const { account, chainId } = await createConnections(options);
   const walletAddress = account.address;
   const contacts = await readContacts({ chainId, walletAddress });
@@ -274,6 +303,7 @@ addSharedOptions(
     .requiredOption("--expect <phrase>", "reciprocal phrase B the responder must submit")
     .option("--ttl-hours <hours>", "invite lifetime in whole hours (default: 24)")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   console.log("Submitting invite...");
   const result = await postInviteWorkflow(options, {
     phraseA: options.phrase,
@@ -300,6 +330,7 @@ addSharedOptions(
     .option("--cursor <inviteId>", "page older invite IDs starting before this invite")
     .option("--limit <count>", "page size (default: 20)")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const result = await listActiveInvitesWorkflow(options, {
     cursor: options.cursor,
     limit: options.limit
@@ -329,6 +360,7 @@ addSharedOptions(
     .option("--reciprocal <phrase>", "reciprocal phrase B expected by the poster")
     .option("--secret <secret>", "invite secret bundle shared by the poster")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   let inviteId = options.inviteId;
   let inviteSecret = options.secret;
   let phraseA = options.phrase;
@@ -366,6 +398,7 @@ addSharedOptions(
     .description("Decrypt and validate invite responses for one of your posted invites.")
     .requiredOption("--invite-id <id>", "invite identifier")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const result = await reviewInviteResponsesWorkflow(options, {
     inviteId: resolveId(options.inviteId, "Invite ID")
   });
@@ -393,6 +426,7 @@ addSharedOptions(
     .requiredOption("--invite-id <id>", "invite identifier")
     .requiredOption("--response-id <id>", "invite response identifier")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   console.log("Accepting invite response...");
   const result = await acceptInviteResponseWorkflow(options, {
     inviteId: resolveId(options.inviteId, "Invite ID"),
@@ -412,6 +446,7 @@ addSharedOptions(
     .command("matches")
     .description("Show accepted invite matches involving the current wallet.")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   const result = await listInviteMatchesWorkflow(options);
 
   if (result.matches.length === 0) {
@@ -442,6 +477,7 @@ addSharedOptions(
     .description("Cancel one of your active invites.")
     .requiredOption("--invite-id <id>", "invite identifier")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   console.log("Cancelling invite...");
   const result = await cancelInviteWorkflow(options, {
     inviteId: resolveId(options.inviteId, "Invite ID")
@@ -460,6 +496,7 @@ addSharedOptions(
     .option("--limit <count>", "page size (default: 20)")
     .option("--follow", "poll every 2 seconds for new messages")
 ).action(async (options) => {
+  applyRuntimeOptions(options);
   if (options.follow && options.cursor !== undefined) {
     throw new Error("--follow cannot be combined with --cursor.");
   }

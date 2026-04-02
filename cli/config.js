@@ -20,19 +20,29 @@ export function resolveRpcUrl(options) {
 }
 
 export function resolveContractAddress(options) {
-  return getAddress(
-    requireValue(
-      options.contractAddress || process.env.CHATTER_CONTRACT_ADDRESS,
-      "Missing contract address. Pass --contract-address or set CHATTER_CONTRACT_ADDRESS."
-    )
+  const value = requireValue(
+    options.contractAddress || process.env.CHATTER_CONTRACT_ADDRESS,
+    "Missing contract address. Pass --contract-address or set CHATTER_CONTRACT_ADDRESS."
   );
+
+  try {
+    return getAddress(value);
+  } catch {
+    throw new Error(`Invalid contract address: ${value}`);
+  }
 }
 
 export function resolvePrivateKey(options) {
-  return requireValue(
+  const privateKey = requireValue(
     options.privateKey || process.env.CHATTER_PRIVATE_KEY,
     "Missing wallet private key. Pass --private-key or set CHATTER_PRIVATE_KEY."
   );
+
+  if (!/^0x[a-fA-F0-9]{64}$/u.test(privateKey)) {
+    throw new Error("Wallet private key must be a 32-byte hex string starting with 0x.");
+  }
+
+  return privateKey;
 }
 
 export function resolveLimit(rawValue) {

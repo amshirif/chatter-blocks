@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import { bytesToHex } from "viem";
 
@@ -12,8 +12,10 @@ import {
   readContacts,
   resolveContactAddress,
   upsertContact,
+  validateContactAlias,
   writeContacts
 } from "../contacts.js";
+import { resolveContractAddress, resolvePrivateKey } from "../config.js";
 import {
   getUnreadCount,
   readAppState,
@@ -42,6 +44,17 @@ import {
   writeKeyring
 } from "../keyring.js";
 import { decodeInviteShareCode, encodeInviteShareCode } from "../workflows.js";
+import { loadDotEnv } from "../env.js";
+import {
+  buildContactsActions,
+  buildConversationActions,
+  buildPromptFooterLines,
+  formatLocalSecretStateLabel,
+  formatCopyBlock,
+  inspectLocalSecretState,
+  resolveMenuSelection
+} from "../app.js";
+import { resolveSetupStrategy } from "../workflows.js";
 
 const ALICE = "0x1000000000000000000000000000000000000001";
 const BOB = "0x2000000000000000000000000000000000000002";
@@ -91,6 +104,163 @@ test("keyring persistence keeps older versions and updates the active version", 
     assert.equal(stored.activeVersion, 2);
     assert.equal(bytesToHex(getLocalKey(stored, 1).publicKey), bytesToHex(firstPair.publicKey));
     assert.equal(bytesToHex(getActiveLocalKey(stored).publicKey), bytesToHex(secondPair.publicKey));
+  } finally {
+    await rm(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("encrypted keyring and hub state require a passphrase and avoid plaintext secrets at rest", async () => {
+  const baseDir = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-secret-"));
+  const passphrase = "correct horse battery staple";
+
+  try {
+    const pair = createChatKeypair();
+    const keyring = upsertKeyMaterial({
+      keyring: null,
+      chainId: 31337,
+      walletAddress: ALICE,
+      version: 1,
+      publicKey: pair.publicKey,
+      secretKey: pair.secretKey
+    });
+    const keyringPath = await writeKeyring({
+      chainId: 31337,
+      walletAddress: ALICE,
+      keyring,
+      baseDir,
+      passphrase
+    });
+    const keyringRaw = await readFile(keyringPath, "utf8");
+
+    assert.doesNotMatch(keyringRaw, /secretKey/);
+    await assert.rejects(
+      () => readKeyring({ chainId: 31337, walletAddress: ALICE, baseDir }),
+      /Keyring is encrypted/
+    );
+
+    const storedKeyring = await readKeyring({
+      chainId: 31337,
+      walletAddress: ALICE,
+      baseDir,
+      passphrase
+    });
+    assert.equal(storedKeyring.activeVersion, 1);
+
+    const hubState = upsertHubInviteRecord({
+      hubState: null,
+      chainId: 31337,
+      walletAddress: ALICE,
+      inviteId: 1n,
+      role: "poster",
+      inviteSecret: `0x${"11".repeat(32)}`,
+      phraseA: "paper boat",
+      phraseB: "silver tide",
+      inviteCommitment: `0x${"22".repeat(32)}`,
+      posterWalletAddress: ALICE,
+      posterKeyVersion: 1,
+      expiresAt: 1000,
+      status: "ACTIVE"
+    });
+    const hubPath = await writeHubState({
+      chainId: 31337,
+      walletAddress: ALICE,
+      hubState,
+      baseDir,
+      passphrase
+    });
+    const hubRaw = await readFile(hubPath, "utf8");
+
+    assert.doesNotMatch(hubRaw, /paper boat/);
+    assert.doesNotMatch(hubRaw, /inviteSecret/);
+    await assert.rejects(
+      () => readHubState({ chainId: 31337, walletAddress: ALICE, baseDir }),
+      /Hub state is encrypted/
+    );
+
+    const storedHubState = await readHubState({
+      chainId: 31337,
+      walletAddress: ALICE,
+      baseDir,
+      passphrase
+    });
+    assert.equal(storedHubState.invites["1"].phraseA, "paper boat");
+  } finally {
+    await rm(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("local secret state detection distinguishes plaintext, locked, unlocked, and missing files", async () => {
+  const baseDir = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-state-"));
+  const passphrase = "correct horse battery staple";
+
+  try {
+    const missing = await inspectLocalSecretState({
+      chainId: 31337,
+      walletAddress: ALICE,
+      baseDir
+    });
+    assert.equal(missing.status, "not-initialized");
+
+    const plaintextPair = createChatKeypair();
+    const plaintextKeyring = upsertKeyMaterial({
+      keyring: null,
+      chainId: 31337,
+      walletAddress: ALICE,
+      version: 1,
+      publicKey: plaintextPair.publicKey,
+      secretKey: plaintextPair.secretKey
+    });
+    await writeKeyring({
+      chainId: 31337,
+      walletAddress: ALICE,
+      keyring: plaintextKeyring,
+      baseDir
+    });
+    const plaintext = await inspectLocalSecretState({
+      chainId: 31337,
+      walletAddress: ALICE,
+      baseDir
+    });
+    assert.equal(plaintext.status, "plaintext");
+
+    const encryptedHubState = upsertHubInviteRecord({
+      hubState: null,
+      chainId: 31337,
+      walletAddress: BOB,
+      inviteId: 1n,
+      role: "poster",
+      inviteSecret: `0x${"11".repeat(32)}`,
+      phraseA: "paper boat",
+      phraseB: "silver tide",
+      inviteCommitment: `0x${"22".repeat(32)}`,
+      posterWalletAddress: BOB,
+      posterKeyVersion: 1,
+      expiresAt: 1000,
+      status: "ACTIVE"
+    });
+    await writeHubState({
+      chainId: 31337,
+      walletAddress: BOB,
+      hubState: encryptedHubState,
+      baseDir,
+      passphrase
+    });
+    const locked = await inspectLocalSecretState({
+      chainId: 31337,
+      walletAddress: BOB,
+      baseDir
+    });
+    assert.equal(locked.status, "encrypted-locked");
+    assert.deepEqual(locked.encryptedFiles, ["invite secrets"]);
+
+    const unlocked = await inspectLocalSecretState({
+      chainId: 31337,
+      walletAddress: BOB,
+      baseDir,
+      passphrase
+    });
+    assert.equal(unlocked.status, "encrypted-unlocked");
+    assert.equal(formatLocalSecretStateLabel(unlocked.status), "encrypted and unlocked");
   } finally {
     await rm(baseDir, { recursive: true, force: true });
   }
@@ -529,4 +699,141 @@ test("share bundle codes roundtrip without losing invite details", () => {
     phraseA: "paper boat",
     phraseB: "silver tide"
   });
+});
+
+test(".env loading fills missing values without overriding existing process env", async () => {
+  const baseDir = await mkdtemp(path.join(os.tmpdir(), "chatter-blocks-env-"));
+  const previousRpcUrl = process.env.CHATTER_RPC_URL;
+  const previousContract = process.env.CHATTER_CONTRACT_ADDRESS;
+
+  try {
+    await writeFile(
+      path.join(baseDir, ".env"),
+      [
+        "CHATTER_RPC_URL=http://127.0.0.1:9999",
+        "CHATTER_CONTRACT_ADDRESS=0x1234567890123456789012345678901234567890"
+      ].join("\n")
+    );
+
+    process.env.CHATTER_RPC_URL = "http://127.0.0.1:8545";
+    delete process.env.CHATTER_CONTRACT_ADDRESS;
+
+    const loaded = loadDotEnv({ cwd: baseDir });
+
+    assert.equal(loaded.loaded, true);
+    assert.equal(process.env.CHATTER_RPC_URL, "http://127.0.0.1:8545");
+    assert.equal(
+      process.env.CHATTER_CONTRACT_ADDRESS,
+      "0x1234567890123456789012345678901234567890"
+    );
+  } finally {
+    if (previousRpcUrl === undefined) {
+      delete process.env.CHATTER_RPC_URL;
+    } else {
+      process.env.CHATTER_RPC_URL = previousRpcUrl;
+    }
+
+    if (previousContract === undefined) {
+      delete process.env.CHATTER_CONTRACT_ADDRESS;
+    } else {
+      process.env.CHATTER_CONTRACT_ADDRESS = previousContract;
+    }
+
+    await rm(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("setup strategy reuses an existing local key on a fresh chain and requires rotation on mismatch", () => {
+  const matchingPair = createChatKeypair();
+  const keyring = upsertKeyMaterial({
+    keyring: null,
+    chainId: 31337,
+    walletAddress: ALICE,
+    version: 1,
+    publicKey: matchingPair.publicKey,
+    secretKey: matchingPair.secretKey
+  });
+
+  const reuse = resolveSetupStrategy({
+    keyring,
+    onChainKey: {
+      version: 0n,
+      pubKey: "0x0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  });
+  const rotate = resolveSetupStrategy({
+    keyring,
+    onChainKey: {
+      version: 2n,
+      pubKey: `0x${"55".repeat(32)}`
+    }
+  });
+
+  assert.equal(reuse.action, "reuse-local-key");
+  assert.equal(bytesToHex(reuse.localKey.publicKey), bytesToHex(matchingPair.publicKey));
+  assert.equal(rotate.action, "rotation-required");
+  assert.match(rotate.message, /chat setup --rotate/);
+});
+
+test("numbered menu selection accepts back and reports invalid choices", () => {
+  const actions = [
+    { key: "1", label: "Hub", value: "hub" },
+    { key: "2", label: "Contacts", value: "contacts" }
+  ];
+
+  assert.deepEqual(resolveMenuSelection("2", actions), {
+    type: "action",
+    action: actions[1]
+  });
+  assert.deepEqual(resolveMenuSelection("b", actions), { type: "back" });
+  assert.equal(resolveMenuSelection("99", actions).type, "invalid");
+});
+
+test("home and contacts action builders keep fixed primary ranges", () => {
+  const conversationActions = buildConversationActions([
+    { peerAddress: ALICE, contact: { alias: "alice" } },
+    { peerAddress: BOB, contact: null }
+  ]);
+  const contactActions = buildContactsActions([
+    { address: ALICE, alias: "alice" },
+    { address: BOB, alias: null }
+  ]);
+
+  assert.deepEqual(conversationActions.map((entry) => entry.key), ["7", "8"]);
+  assert.deepEqual(contactActions.map((entry) => entry.key), ["5", "6"]);
+});
+
+test("copy blocks preserve full share bundle values without truncation", () => {
+  const longValue = `share-${"x".repeat(160)}`;
+  const block = formatCopyBlock("shareCode", longValue);
+
+  assert.equal(block, `shareCode:\n${longValue}`);
+  assert.match(block, new RegExp(`^shareCode:\\nshare-x{160}$`));
+});
+
+test("prompt footer uses compact back and quit lines without an actions list", () => {
+  assert.deepEqual(buildPromptFooterLines(), ["b. Back", "q. Quit"]);
+  assert.deepEqual(
+    buildPromptFooterLines({ helpLines: ["Paste the full shareCode."] }),
+    ["Paste the full shareCode.", "b. Back", "q. Quit"]
+  );
+});
+
+test("config resolution rejects invalid contract addresses and private keys", () => {
+  assert.throws(
+    () => resolveContractAddress({ contractAddress: "not-an-address" }),
+    /Invalid contract address/
+  );
+  assert.throws(
+    () => resolvePrivateKey({ privateKey: "0x1234" }),
+    /32-byte hex string/
+  );
+});
+
+test("contact alias validation rejects empty, long, and invalid aliases", () => {
+  assert.equal(validateContactAlias("alice"), null);
+  assert.equal(validateContactAlias("Alice One"), null);
+  assert.match(validateContactAlias("", { allowEmpty: false }), /required/);
+  assert.match(validateContactAlias("a".repeat(41), { allowEmpty: false }), /40 characters/);
+  assert.match(validateContactAlias("alice!"), /may only include/);
 });

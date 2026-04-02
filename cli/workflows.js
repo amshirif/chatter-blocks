@@ -277,33 +277,75 @@ async function upsertMatchedContact({
   };
 }
 
+export function resolveSetupStrategy({ rotate = false, keyring, onChainKey }) {
+  const localKey = getActiveLocalKey(keyring);
+
+  if (rotate) {
+    return {
+      action: "create-new-key",
+      localKey: null
+    };
+  }
+
+  if (keyring && onChainKey.version > 0n && localKeyMatchesOnChain({
+    keyring,
+    onChainVersion: onChainKey.version,
+    onChainPubKey: onChainKey.pubKey
+  })) {
+    return {
+      action: "already-configured",
+      localKey
+    };
+  }
+
+  if (onChainKey.version === 0n && localKey) {
+    return {
+      action: "reuse-local-key",
+      localKey
+    };
+  }
+
+  if (onChainKey.version === 0n) {
+    return {
+      action: "create-new-key",
+      localKey: null
+    };
+  }
+
+  return {
+    action: "rotation-required",
+    localKey,
+    message: "Existing on-chain chat key does not match local key material. Run `pnpm chat setup --rotate` or `pnpm chat start --rotate` to replace it."
+  };
+}
+
 export async function setupChatWorkflow(options, { rotate = false } = {}) {
   const { publicClient, walletClient, account, chainId, contractAddress } = await createConnections(options);
   const walletAddress = getAddress(account.address);
   const onChainKey = await getActiveChatKey(publicClient, contractAddress, walletAddress);
   const keyring = await readKeyring({ chainId, walletAddress });
+  const strategy = resolveSetupStrategy({ rotate, keyring, onChainKey });
 
-  if (!rotate) {
-    if (keyring && onChainKey.version > 0n && localKeyMatchesOnChain({
-      keyring,
-      onChainVersion: onChainKey.version,
-      onChainPubKey: onChainKey.pubKey
-    })) {
-      return {
-        alreadyConfigured: true,
-        walletAddress,
-        chainId,
-        contractAddress,
-        onChainKey
-      };
-    }
-
-    if (keyring || onChainKey.version > 0n) {
-      throw new Error("Chat key already exists or is out of sync. Re-run with --rotate to replace it.");
-    }
+  if (strategy.action === "already-configured") {
+    return {
+      alreadyConfigured: true,
+      walletAddress,
+      chainId,
+      contractAddress,
+      onChainKey
+    };
   }
 
-  const keyPair = createChatKeypair();
+  if (strategy.action === "rotation-required") {
+    throw new Error(strategy.message);
+  }
+
+  const keyPair = strategy.action === "reuse-local-key"
+    ? {
+      publicKey: strategy.localKey.publicKey,
+      secretKey: strategy.localKey.secretKey
+    }
+    : createChatKeypair();
   const registration = await registerChatKey(
     publicClient,
     walletClient,
@@ -326,6 +368,7 @@ export async function setupChatWorkflow(options, { rotate = false } = {}) {
 
   return {
     alreadyConfigured: false,
+    reusedLocalKey: strategy.action === "reuse-local-key",
     walletAddress,
     chainId,
     contractAddress,

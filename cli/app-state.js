@@ -19,7 +19,6 @@ function normalizeConversationRecord(address, record) {
 
 function normalizeSettings(settings) {
   return {
-    pollSeconds: Number.isInteger(settings?.pollSeconds) && settings.pollSeconds > 0 ? settings.pollSeconds : 2,
     showExactTimestamps: Boolean(settings?.showExactTimestamps)
   };
 }
